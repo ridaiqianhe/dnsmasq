@@ -28,17 +28,17 @@
 
 ### 快速安装（推荐）：
 ``` Bash
-wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && bash dnsmasq_sniproxy.sh -f
+wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/xsidc/dnsmasq/master/dnsmasq_sniproxy.sh && bash dnsmasq_sniproxy.sh -f
 ```
 
 ### 普通安装：
 ``` Bash
-wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && bash dnsmasq_sniproxy.sh -i
+wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/xsidc/dnsmasq/master/dnsmasq_sniproxy.sh && bash dnsmasq_sniproxy.sh -i
 ```
 
 ### 卸载方法：
 ``` Bash
-wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq_sniproxy.sh && bash dnsmasq_sniproxy.sh -u
+wget --no-check-certificate -O dnsmasq_sniproxy.sh https://raw.githubusercontent.com/xsidc/dnsmasq/master/dnsmasq_sniproxy.sh && bash dnsmasq_sniproxy.sh -u
 ```
 
 ### 使用方法：
