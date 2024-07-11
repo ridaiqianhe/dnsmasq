@@ -249,8 +249,8 @@ install_dnsmasq(){
         error_detect_depends "apt-get -y install dnsmasq"
     fi
     [ ! -f /usr/sbin/dnsmasq ] && echo -e "[${red}Error${plain}] 安装dnsmasq出现问题，请检查." && exit 1
-    download /etc/dnsmasq.d/custom_netflix.conf https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq.conf
-    download /tmp/proxy-domains.txt https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/proxy-domains.txt
+    download /etc/dnsmasq.d/custom_netflix.conf https://raw.githubusercontent.com/xsidc/dnsmasq/master/dnsmasq.conf
+    download /tmp/proxy-domains.txt https://raw.githubusercontent.com/xsidc/dnsmasq/master/proxy-domains.txt
     for domain in $(cat /tmp/proxy-domains.txt); do
         printf "address=/${domain}/${publicip}\n"\
         | tee -a /etc/dnsmasq.d/custom_netflix.conf > /dev/null 2>&1
