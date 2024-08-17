@@ -213,3 +213,14 @@ biliapi.net
 bilibili.com
 bilibili.tv
 bilivideo.com
+cdn.usefathom.com
+anthropic.com
+claude.ai
+redd.it
+reddit.com
+redditmail.com
+redditmedia.com
+redditstatic.com
+reddituploads.com
+reddituploads.com.cdn-cf.behance.net
+reddituploads.com.cdn-cf.dropbox.com
