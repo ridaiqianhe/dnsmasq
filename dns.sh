@@ -28,7 +28,7 @@ install_dnsmasq() {
 
     echo -e "[${green}Info${plain}] 配置 dnsmasq..."
     cat <<EOF > /etc/dnsmasq.conf
-listen-address=0.0.0.0
+listen-address=$external_ip
 bind-interfaces
 
 # 代理所有域名，将所有请求解析到服务器的实际IP地址
@@ -46,6 +46,7 @@ EOF
 }
 
 install_sniproxy() {
+    external_ip=$(get_external_ip)
     echo -e "[${green}Info${plain}] 安装 sniproxy..."
     apt-get install -y sniproxy
 
@@ -65,7 +66,7 @@ resolver {
     mode ipv4_only
 }
 
-listener 0.0.0.0:80 {
+listener $external_ip:80 {
     proto http
     access_log {
         filename /var/log/sniproxy/http_access.log
@@ -73,7 +74,7 @@ listener 0.0.0.0:80 {
     }
 }
 
-listener 0.0.0.0:443 {
+listener $external_ip:443 {
     proto tls
     access_log {
         filename /var/log/sniproxy/https_access.log
