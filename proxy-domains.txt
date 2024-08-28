@@ -1,4 +1,3 @@
-ip.sb
 gamer.com.tw
 bahamut.com.tw
 hinet.net
@@ -20,7 +19,6 @@ litv.tv
 LiTV.tv
 cdn.hinet.net
 4gtv.tv
-cdn.hinet.net
 dcard.tw
 elaott.tv
 cmail20.com
@@ -74,7 +72,6 @@ vod-abematv.akamaized.net
 ameba.jp
 hayabusa.io
 mobile-collector.newrelic.com
-vod-abematv.akamaized.net
 bucketeer.jp
 abema.adx.promo
 hayabusa.media
@@ -109,7 +106,6 @@ tiqcdn.com
 microad.jp
 adsrvr.org
 adsmoloco.com
-yimg.jp
 webantenna.info
 doubleclick.net
 usergram.info
@@ -156,16 +152,21 @@ tvbweekly.com
 tvmedia.net.au
 videos-f.jwpsrv.com
 hoy.tv
+disney.api.edge.bamgrid.com
+disney-plus.net
+disneyplus.com
+dssott.com
+disneynow.com
+disneystreaming.com
+cdn.registerdisney.go.com
 e13252.dscg.akamaiedge.net
 h-netflix.online-metrix.net
 netflix.com.edgesuite.net
 cookielaw.org
-fast.com
 flxvpn.net
 netflix.ca
 netflix.com
 netflix.com.au
-netflix.com.edgesuite.net
 netflix.net
 netflixdnstest0.com
 netflixdnstest1.com
@@ -187,13 +188,6 @@ nflximg.net
 nflxsearch.net
 nflxso.net
 nflxvideo.net
-disney.api.edge.bamgrid.com
-disney-plus.net
-disneyplus.com
-dssott.com
-disneynow.com
-disneystreaming.com
-cdn.registerdisney.go.com
 cdn.usefathom.com
 anthropic.com
 claude.ai
@@ -255,4 +249,9 @@ tiktokmusic.app
 tiktokv.com
 tiktokv.us
 ttwebview.com
-musical.ly
+fast.com
+ooklaserver.net
+speed.cloudflare.com
+speed.dler.io
+ip.sb
+ip.skk.moe
