@@ -385,27 +385,67 @@ show_menu() {
 fix_sniproxy() {
     echo -e "[${green}Info${plain}] 修复SNIProxy..."
 
-    # 停止服务
+    # 彻底停止服务
     systemctl stop sniproxy 2>/dev/null
+    systemctl kill sniproxy 2>/dev/null
 
-    # 杀死所有sniproxy进程
-    echo -e "[${green}Info${plain}] 清理残留进程..."
-    pkill -9 sniproxy
-    sleep 2
+    # 强制杀死所有sniproxy进程
+    echo -e "[${green}Info${plain}] 清理所有sniproxy进程..."
+    killall -9 sniproxy 2>/dev/null
+    pkill -9 sniproxy 2>/dev/null
 
-    # 检查端口
-    echo -e "[${green}Info${plain}] 检查端口占用..."
+    # 清理可能的PID文件
+    rm -f /var/run/sniproxy.pid
+
+    # 等待进程完全结束
+    sleep 3
+
+    # 详细检查端口占用
+    echo -e "[${green}Info${plain}] 检查端口占用情况..."
+
+    port_80_used=false
+    port_443_used=false
+
+    # 检查80端口
     if lsof -i :80 > /dev/null 2>&1; then
-        echo -e "[${yellow}Warning${plain}] 80端口被占用:"
+        echo -e "[${yellow}Warning${plain}] 80端口被以下进程占用:"
         lsof -i :80 | grep LISTEN
+        port_80_used=true
+    else
+        echo -e "[${green}✓${plain}] 80端口可用"
     fi
 
+    # 检查443端口
     if lsof -i :443 > /dev/null 2>&1; then
-        echo -e "[${yellow}Warning${plain}] 443端口被占用:"
+        echo -e "[${yellow}Warning${plain}] 443端口被以下进程占用:"
         lsof -i :443 | grep LISTEN
+        port_443_used=true
+    else
+        echo -e "[${green}✓${plain}] 443端口可用"
     fi
 
-    # 重新配置
+    # 如果端口被占用，询问是否强制停止
+    if [ "$port_80_used" = true ] || [ "$port_443_used" = true ]; then
+        echo -e "\n[${yellow}Warning${plain}] 检测到端口被占用"
+        echo -e "是否强制停止占用端口的服务? [y/N]"
+        read -r response
+        if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+            # 停止常见的web服务
+            for service in nginx apache2 httpd caddy; do
+                if systemctl is-active --quiet $service; then
+                    echo -e "[${green}Info${plain}] 停止 $service..."
+                    systemctl stop $service
+                    systemctl disable $service 2>/dev/null
+                fi
+            done
+
+            # 再次等待
+            sleep 2
+        fi
+    fi
+
+    # 创建配置文件
+    echo -e "[${green}Info${plain}] 创建SNIProxy配置..."
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
 pidfile /var/run/sniproxy.pid
@@ -418,11 +458,15 @@ error_log {
 listener 0.0.0.0:80 {
     proto http
     table http_hosts
+
+    fallback 127.0.0.1:8080
 }
 
 listener 0.0.0.0:443 {
     proto tls
     table https_hosts
+
+    fallback 127.0.0.1:8443
 }
 
 table http_hosts {
@@ -434,14 +478,60 @@ table https_hosts {
 }
 EOF
 
+    # 测试配置文件
+    echo -e "[${green}Info${plain}] 测试配置文件..."
+    if /usr/sbin/sniproxy -c /etc/sniproxy.conf -f -n 1 2>&1 | grep -q "error"; then
+        echo -e "[${red}Error${plain}] 配置文件有错误"
+
+        # 使用最简化配置
+        echo -e "[${green}Info${plain}] 使用最简化配置..."
+        cat > $SNIPROXY_CONFIG <<'EOF'
+user daemon
+
+listener 0.0.0.0:80 {
+    proto http
+}
+
+listener 0.0.0.0:443 {
+    proto tls
+}
+
+table {
+    .* *
+}
+EOF
+    fi
+
     # 启动服务
+    echo -e "[${green}Info${plain}] 启动SNIProxy服务..."
+    systemctl daemon-reload
     systemctl start sniproxy
 
+    # 等待服务启动
+    sleep 2
+
+    # 检查服务状态
     if systemctl is-active --quiet sniproxy; then
-        echo -e "[${green}Success${plain}] SNIProxy修复成功"
+        echo -e "[${green}Success${plain}] SNIProxy修复成功!"
+
+        # 显示监听端口
+        echo -e "\n[${green}Info${plain}] SNIProxy监听端口:"
+        ss -tuln | grep -E ':80|:443' | grep LISTEN
     else
-        echo -e "[${red}Error${plain}] SNIProxy仍有问题，请检查端口占用"
+        echo -e "[${red}Error${plain}] SNIProxy启动失败"
+
+        # 显示详细错误
+        echo -e "\n[${yellow}Debug${plain}] 服务状态:"
         systemctl status sniproxy --no-pager
+
+        echo -e "\n[${yellow}Debug${plain}] 系统日志:"
+        journalctl -u sniproxy -n 20 --no-pager
+
+        echo -e "\n[${yellow}提示${plain}] 可能的解决方案:"
+        echo -e "1. 检查80/443端口是否被占用: lsof -i :80 && lsof -i :443"
+        echo -e "2. 停止占用的服务: systemctl stop nginx apache2"
+        echo -e "3. 检查配置文件: cat /etc/sniproxy.conf"
+        echo -e "4. 手动测试: /usr/sbin/sniproxy -c /etc/sniproxy.conf -f"
     fi
 }
 
