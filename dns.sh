@@ -6,11 +6,9 @@ yellow='\033[0;33m'
 blue='\033[0;34m'
 plain='\033[0m'
 
-[[ $EUID -ne 0 ]] && echo -e "[${red}Error${plain}] 请使用root用户来执行脚本!" && exit 1
+[[ $EUID -ne 0 ]] && echo -e "[${red}Error${plain}] 请使用root权限运行!" && exit 1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROXY_DOMAINS_FILE="${SCRIPT_DIR}/proxy-domains.txt"
-PROXY_DOMAINS_URL="https://raw.githubusercontent.com/miyouzi/dnsmasq_sniproxy_install/main/proxy-domains.txt"
 LOG_DIR="/var/log/dns-proxy"
 DNSMASQ_CONFIG="/etc/dnsmasq.conf"
 SNIPROXY_CONFIG="/etc/sniproxy.conf"
@@ -54,10 +52,6 @@ check_ports() {
             if ss -tuln | grep -q ":$port "; then
                 occupied+=($port)
             fi
-        elif command -v netstat > /dev/null; then
-            if netstat -tuln | grep -q ":$port "; then
-                occupied+=($port)
-            fi
         fi
     done
 
@@ -67,14 +61,12 @@ check_ports() {
         read -r response
         if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
             stop_conflicting_services
-        else
-            echo -e "[${red}Error${plain}] 端口被占用，无法继续安装。"
-            exit 1
         fi
     fi
 }
 
 stop_conflicting_services() {
+    # 停止已知服务
     local services=("systemd-resolved" "bind9" "named" "apache2" "nginx" "httpd")
 
     for service in "${services[@]}"; do
@@ -84,6 +76,13 @@ stop_conflicting_services() {
             systemctl disable $service 2>/dev/null
         fi
     done
+
+    # 强制杀死残留的sniproxy进程
+    echo -e "[${green}Info${plain}] 清理残留进程..."
+    pkill -9 sniproxy 2>/dev/null
+
+    # 等待端口释放
+    sleep 2
 }
 
 get_external_ip() {
@@ -102,38 +101,32 @@ get_external_ip() {
         fi
     done
 
-    echo -e "[${red}Error${plain}] 无法获取外部IP地址"
-    exit 1
-}
-
-download_proxy_domains() {
-    echo -e "[${green}Info${plain}] 下载流媒体域名列表..."
-
-    if ! curl -s -L -o "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_URL}"; then
-        echo -e "[${yellow}Warning${plain}] 无法下载域名列表，使用本地文件"
-        if [ ! -f "${PROXY_DOMAINS_FILE}" ]; then
-            echo -e "[${red}Error${plain}] 本地域名列表文件不存在: ${PROXY_DOMAINS_FILE}"
-            return 1
-        fi
-    else
-        mv "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_FILE}"
-        echo -e "[${green}Info${plain}] 域名列表更新成功"
+    # 获取本地IP作为备用
+    local_ip=$(ip addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v "127.0.0.1" | head -1)
+    if [ -n "$local_ip" ]; then
+        echo "${local_ip}"
+        return 0
     fi
 
-    return 0
+    echo -e "[${red}Error${plain}] 无法获取IP地址"
+    exit 1
 }
 
 install_dependencies() {
     echo -e "[${green}Info${plain}] 安装依赖包..."
 
-    $PKG_UPDATE
+    # 修复DNS解析
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 
-    local packages=("curl" "wget" "lsof" "iptables" "ipset")
+    $PKG_UPDATE > /dev/null 2>&1
+
+    local packages=("curl" "wget" "lsof" "iptables")
 
     for pkg in "${packages[@]}"; do
         if ! command -v $pkg > /dev/null; then
             echo -e "[${green}Info${plain}] 安装 $pkg..."
-            $PKG_MANAGER install -y $pkg
+            $PKG_MANAGER install -y $pkg > /dev/null 2>&1
         fi
     done
 }
@@ -143,13 +136,11 @@ install_dnsmasq() {
     echo -e "[${green}Info${plain}] 安装 dnsmasq..."
     echo -e "[${green}Info${plain}] 服务器IP: ${external_ip}"
 
-    $PKG_MANAGER install -y dnsmasq
+    $PKG_MANAGER install -y dnsmasq > /dev/null 2>&1
 
     echo -e "[${green}Info${plain}] 配置 dnsmasq..."
 
-    download_proxy_domains
-
-    cat <<EOF > $DNSMASQ_CONFIG
+    cat > $DNSMASQ_CONFIG <<EOF
 # 基础配置
 user=nobody
 no-resolv
@@ -166,29 +157,50 @@ server=8.8.4.4
 server=1.1.1.1
 server=1.0.0.1
 
-# 国内DNS服务器（用于国内域名）
+# 国内DNS（用于国内域名）
 server=/cn/223.5.5.5
 server=/cn/119.29.29.29
 
 # 日志配置
-log-queries
-log-facility=/var/log/dns-proxy/dnsmasq.log
+log-facility=/var/log/dnsmasq.log
 
-# 流媒体域名解析配置
+# 流媒体域名解析到本服务器
+address=/netflix.com/$external_ip
+address=/netflix.net/$external_ip
+address=/nflximg.com/$external_ip
+address=/nflximg.net/$external_ip
+address=/nflxvideo.net/$external_ip
+address=/nflxext.com/$external_ip
+address=/nflxso.net/$external_ip
+
+address=/disneyplus.com/$external_ip
+address=/disney-plus.net/$external_ip
+address=/dssott.com/$external_ip
+address=/bamgrid.com/$external_ip
+address=/disneystreaming.com/$external_ip
+
+address=/youtube.com/$external_ip
+address=/googlevideo.com/$external_ip
+address=/ytimg.com/$external_ip
+address=/ggpht.com/$external_ip
+address=/youtubei.googleapis.com/$external_ip
+
+address=/amazonvideo.com/$external_ip
+address=/primevideo.com/$external_ip
+address=/aiv-cdn.net/$external_ip
+address=/aiv-delivery.net/$external_ip
+address=/pv-cdn.net/$external_ip
+
+address=/hbo.com/$external_ip
+address=/hbomax.com/$external_ip
+address=/hbogo.com/$external_ip
+address=/hbonow.com/$external_ip
+address=/max.com/$external_ip
 EOF
 
-    if [ -f "${PROXY_DOMAINS_FILE}" ]; then
-        echo -e "[${green}Info${plain}] 添加流媒体域名解析规则..."
-        while IFS= read -r domain || [ -n "$domain" ]; do
-            [ -z "$domain" ] && continue
-            [[ $domain == \#* ]] && continue
-            echo "address=/${domain}/${external_ip}" >> $DNSMASQ_CONFIG
-        done < "${PROXY_DOMAINS_FILE}"
-    fi
-
     mkdir -p $LOG_DIR
-    touch $LOG_DIR/dnsmasq.log
-    chown nobody:nogroup $LOG_DIR/dnsmasq.log
+    touch /var/log/dnsmasq.log
+    chown nobody:nogroup /var/log/dnsmasq.log
 
     systemctl enable dnsmasq
     systemctl restart dnsmasq
@@ -197,20 +209,22 @@ EOF
         echo -e "[${green}Success${plain}] dnsmasq 安装并启动成功"
     else
         echo -e "[${red}Error${plain}] dnsmasq 启动失败"
-        systemctl status dnsmasq
-        exit 1
+        systemctl status dnsmasq --no-pager
     fi
 }
 
 install_sniproxy() {
-    external_ip=$(get_external_ip)
     echo -e "[${green}Info${plain}] 安装 sniproxy..."
 
-    $PKG_MANAGER install -y sniproxy
+    # 先清理残留进程
+    pkill -9 sniproxy 2>/dev/null
+    sleep 1
+
+    $PKG_MANAGER install -y sniproxy > /dev/null 2>&1
 
     echo -e "[${green}Info${plain}] 配置 sniproxy..."
 
-    # 创建正确的sniproxy配置文件
+    # 创建正确的配置文件
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
 pidfile /var/run/sniproxy.pid
@@ -239,53 +253,39 @@ table https_hosts {
 }
 EOF
 
-    mkdir -p $LOG_DIR
-
     systemctl enable sniproxy
     systemctl restart sniproxy
 
     if systemctl is-active --quiet sniproxy; then
         echo -e "[${green}Success${plain}] sniproxy 安装并启动成功"
     else
-        echo -e "[${yellow}Warning${plain}] sniproxy 启动失败（可能443端口被占用）"
-        echo -e "[${yellow}Info${plain}] 如需HTTPS代理，请手动停止占用443端口的服务"
+        echo -e "[${yellow}Warning${plain}] sniproxy 启动失败（端口可能被占用）"
+        echo -e "[${yellow}提示${plain}] 运行 'lsof -i :80' 和 'lsof -i :443' 查看端口占用"
     fi
 }
 
 configure_firewall() {
     echo -e "[${green}Info${plain}] 配置防火墙规则..."
 
-    # 检查防火墙类型
     if command -v ufw > /dev/null; then
-        echo -e "[${green}Info${plain}] 配置 UFW 防火墙..."
-        ufw allow 53/tcp
-        ufw allow 53/udp
-        ufw allow 80/tcp
-        ufw allow 443/tcp
-        ufw --force enable
+        ufw allow 53/tcp > /dev/null 2>&1
+        ufw allow 53/udp > /dev/null 2>&1
+        ufw allow 80/tcp > /dev/null 2>&1
+        ufw allow 443/tcp > /dev/null 2>&1
+        echo -e "[${green}Success${plain}] UFW防火墙规则已配置"
     elif command -v firewall-cmd > /dev/null; then
-        echo -e "[${green}Info${plain}] 配置 firewalld..."
-        firewall-cmd --permanent --add-service=dns
-        firewall-cmd --permanent --add-service=http
-        firewall-cmd --permanent --add-service=https
-        firewall-cmd --reload
+        firewall-cmd --permanent --add-service=dns > /dev/null 2>&1
+        firewall-cmd --permanent --add-service=http > /dev/null 2>&1
+        firewall-cmd --permanent --add-service=https > /dev/null 2>&1
+        firewall-cmd --reload > /dev/null 2>&1
+        echo -e "[${green}Success${plain}] Firewalld规则已配置"
     else
-        echo -e "[${green}Info${plain}] 配置 iptables..."
         iptables -I INPUT -p tcp --dport 53 -j ACCEPT
         iptables -I INPUT -p udp --dport 53 -j ACCEPT
         iptables -I INPUT -p tcp --dport 80 -j ACCEPT
         iptables -I INPUT -p tcp --dport 443 -j ACCEPT
-
-        # 保存规则
-        if [ "$OS" == "ubuntu" ] || [ "$OS" == "debian" ]; then
-            $PKG_MANAGER install -y iptables-persistent
-            netfilter-persistent save
-        elif [ "$OS" == "centos" ] || [ "$OS" == "rhel" ]; then
-            service iptables save
-        fi
+        echo -e "[${green}Success${plain}] iptables规则已配置"
     fi
-
-    echo -e "[${green}Success${plain}] 防火墙规则配置完成"
 }
 
 show_status() {
@@ -293,14 +293,12 @@ show_status() {
 
     echo -e "\n${blue}======== 服务状态 ========${plain}"
 
-    # DNSMasq 状态
     if systemctl is-active --quiet dnsmasq; then
         echo -e "DNSMasq: [${green}运行中${plain}]"
     else
         echo -e "DNSMasq: [${red}已停止${plain}]"
     fi
 
-    # SNIProxy 状态
     if systemctl is-active --quiet sniproxy; then
         echo -e "SNIProxy: [${green}运行中${plain}]"
     else
@@ -316,32 +314,26 @@ show_status() {
     echo -e "\n${blue}======== 客户端配置 ========${plain}"
     echo -e "将设备的DNS服务器设置为: ${green}${external_ip}${plain}"
 
-    if [ -f "${PROXY_DOMAINS_FILE}" ]; then
-        domain_count=$(grep -v '^#' "${PROXY_DOMAINS_FILE}" | grep -v '^$' | wc -l)
-        echo -e "已配置流媒体域名数: ${green}${domain_count}${plain}"
-    fi
-
-    echo -e "\n${blue}======== 日志文件 ========${plain}"
-    echo -e "DNSMasq日志: ${LOG_DIR}/dnsmasq.log"
-    echo -e "SNIProxy访问日志: ${LOG_DIR}/sniproxy_access.log"
-    echo -e "HTTP日志: ${LOG_DIR}/http_access.log"
-    echo -e "HTTPS日志: ${LOG_DIR}/https_access.log"
+    echo -e "\n${blue}======== 测试命令 ========${plain}"
+    echo -e "nslookup netflix.com ${external_ip}"
+    echo -e "dig @${external_ip} youtube.com"
 }
 
 restart_services() {
     echo -e "[${green}Info${plain}] 重启服务..."
 
+    # 先杀死残留进程
+    pkill -9 sniproxy 2>/dev/null
+    sleep 1
+
     systemctl restart dnsmasq
     systemctl restart sniproxy
-
-    sleep 2
 
     if systemctl is-active --quiet dnsmasq && systemctl is-active --quiet sniproxy; then
         echo -e "[${green}Success${plain}] 服务重启成功"
     else
-        echo -e "[${red}Error${plain}] 服务重启失败"
+        echo -e "[${yellow}Warning${plain}] 部分服务可能未成功启动"
         show_status
-        exit 1
     fi
 }
 
@@ -357,6 +349,7 @@ uninstall_all() {
     echo -e "[${green}Info${plain}] 停止服务..."
     systemctl stop dnsmasq sniproxy 2>/dev/null
     systemctl disable dnsmasq sniproxy 2>/dev/null
+    pkill -9 sniproxy 2>/dev/null
 
     echo -e "[${green}Info${plain}] 卸载软件包..."
     if [ "$PKG_MANAGER" == "apt-get" ]; then
@@ -368,11 +361,13 @@ uninstall_all() {
     echo -e "[${green}Info${plain}] 清理配置文件..."
     rm -f $DNSMASQ_CONFIG $SNIPROXY_CONFIG
     rm -rf $LOG_DIR
-    rm -f /etc/systemd/system/sniproxy.service
+
+    # 恢复DNS
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 
     echo -e "[${green}Success${plain}] 卸载完成"
 }
-
 
 show_menu() {
     echo -e "\n${blue}======== DNS流媒体解锁服务 ========${plain}"
@@ -381,9 +376,73 @@ show_menu() {
     echo "3. 仅安装 SNIProxy"
     echo "4. 查看服务状态"
     echo "5. 重启服务"
-    echo "6. 卸载所有组件"
+    echo "6. 修复SNIProxy"
+    echo "7. 卸载所有组件"
     echo "0. 退出"
     echo -e "${blue}====================================${plain}"
+}
+
+fix_sniproxy() {
+    echo -e "[${green}Info${plain}] 修复SNIProxy..."
+
+    # 停止服务
+    systemctl stop sniproxy 2>/dev/null
+
+    # 杀死所有sniproxy进程
+    echo -e "[${green}Info${plain}] 清理残留进程..."
+    pkill -9 sniproxy
+    sleep 2
+
+    # 检查端口
+    echo -e "[${green}Info${plain}] 检查端口占用..."
+    if lsof -i :80 > /dev/null 2>&1; then
+        echo -e "[${yellow}Warning${plain}] 80端口被占用:"
+        lsof -i :80 | grep LISTEN
+    fi
+
+    if lsof -i :443 > /dev/null 2>&1; then
+        echo -e "[${yellow}Warning${plain}] 443端口被占用:"
+        lsof -i :443 | grep LISTEN
+    fi
+
+    # 重新配置
+    cat > $SNIPROXY_CONFIG <<'EOF'
+user daemon
+pidfile /var/run/sniproxy.pid
+
+error_log {
+    syslog daemon
+    priority notice
+}
+
+listener 0.0.0.0:80 {
+    proto http
+    table http_hosts
+}
+
+listener 0.0.0.0:443 {
+    proto tls
+    table https_hosts
+}
+
+table http_hosts {
+    .* *
+}
+
+table https_hosts {
+    .* *
+}
+EOF
+
+    # 启动服务
+    systemctl start sniproxy
+
+    if systemctl is-active --quiet sniproxy; then
+        echo -e "[${green}Success${plain}] SNIProxy修复成功"
+    else
+        echo -e "[${red}Error${plain}] SNIProxy仍有问题，请检查端口占用"
+        systemctl status sniproxy --no-pager
+    fi
 }
 
 main() {
@@ -392,7 +451,7 @@ main() {
     if [ $# -eq 0 ]; then
         while true; do
             show_menu
-            read -p "请选择 [0-6]: " choice
+            read -p "请选择 [0-7]: " choice
 
             case $choice in
                 0)
@@ -428,6 +487,9 @@ main() {
                     restart_services
                     ;;
                 6)
+                    fix_sniproxy
+                    ;;
+                7)
                     uninstall_all
                     ;;
                 *)
@@ -446,8 +508,7 @@ main() {
                 echo "  -u, --uninstall   卸载所有组件"
                 echo "  -s, --status      查看服务状态"
                 echo "  -r, --restart     重启服务"
-                echo "  -d, --update      更新域名列表"
-                echo ""
+                echo "  -f, --fix         修复SNIProxy"
                 ;;
             -i|--install)
                 check_ports
@@ -455,7 +516,6 @@ main() {
                 install_dnsmasq
                 install_sniproxy
                 configure_firewall
-                setup_cron
                 show_status
                 ;;
             -u|--uninstall)
@@ -467,8 +527,8 @@ main() {
             -r|--restart)
                 restart_services
                 ;;
-            -d|--update)
-                update_domains
+            -f|--fix)
+                fix_sniproxy
                 ;;
             *)
                 echo -e "[${red}Error${plain}] 无效的参数: $1"
