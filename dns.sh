@@ -230,7 +230,7 @@ install_sniproxy() {
     killall -9 sniproxy 2>/dev/null
 
     # 清理PID文件
-    rm -f /var/run/sniproxy.pid
+    rm -f /var/run/sniproxy.pid /run/sniproxy.pid
 
     # 等待进程完全退出
     sleep 2
@@ -243,7 +243,7 @@ install_sniproxy() {
     # 创建稳定的配置文件
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
-pidfile /var/run/sniproxy.pid
+pidfile /run/sniproxy.pid
 
 error_log {
     syslog daemon
@@ -270,11 +270,13 @@ EOF
     cat > /etc/systemd/system/sniproxy.service.d/override.conf <<'EOF'
 [Service]
 Type=forking
-PIDFile=/var/run/sniproxy.pid
-ExecStartPre=/bin/rm -f /var/run/sniproxy.pid
+PIDFile=/run/sniproxy.pid
+ExecStartPre=
+ExecStart=
+ExecStartPre=/bin/rm -f /run/sniproxy.pid
 ExecStart=/usr/sbin/sniproxy -c /etc/sniproxy.conf
 ExecStop=/bin/kill -TERM $MAINPID
-ExecStopPost=/bin/rm -f /var/run/sniproxy.pid
+ExecStopPost=/bin/rm -f /run/sniproxy.pid
 KillMode=control-group
 KillSignal=SIGKILL
 TimeoutStopSec=5
@@ -486,7 +488,10 @@ fix_sniproxy() {
     done
 
     # 清理PID文件
-    rm -f /var/run/sniproxy.pid
+    rm -f /var/run/sniproxy.pid /run/sniproxy.pid
+
+    # 清理旧的覆盖配置
+    rm -rf /etc/systemd/system/sniproxy.service.d/
 
     sleep 2
 
@@ -522,7 +527,7 @@ fix_sniproxy() {
     echo -e "[${green}Info${plain}] 创建配置文件..."
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
-pidfile /var/run/sniproxy.pid
+pidfile /run/sniproxy.pid
 
 error_log {
     syslog daemon
@@ -550,11 +555,13 @@ EOF
     cat > /etc/systemd/system/sniproxy.service.d/override.conf <<'EOF'
 [Service]
 Type=forking
-PIDFile=/var/run/sniproxy.pid
-ExecStartPre=/bin/rm -f /var/run/sniproxy.pid
+PIDFile=/run/sniproxy.pid
+ExecStartPre=
+ExecStart=
+ExecStartPre=/bin/rm -f /run/sniproxy.pid
 ExecStart=/usr/sbin/sniproxy -c /etc/sniproxy.conf
 ExecStop=/bin/kill -TERM $MAINPID
-ExecStopPost=/bin/rm -f /var/run/sniproxy.pid
+ExecStopPost=/bin/rm -f /run/sniproxy.pid
 KillMode=control-group
 KillSignal=SIGKILL
 TimeoutStopSec=5
