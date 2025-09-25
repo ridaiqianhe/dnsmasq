@@ -3,131 +3,625 @@
 red='\033[0;31m'
 green='\033[0;32m'
 yellow='\033[0;33m'
+blue='\033[0;34m'
 plain='\033[0m'
 
 [[ $EUID -ne 0 ]] && echo -e "[${red}Error${plain}] 请使用root用户来执行脚本!" && exit 1
 
-check_ports() {
-    for port in 80 443 53; do
-        if lsof -i :$port > /dev/null; then
-            echo -e "[${red}Error${plain}] 端口 $port 被占用，无法继续安装。"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROXY_DOMAINS_FILE="${SCRIPT_DIR}/proxy-domains.txt"
+PROXY_DOMAINS_URL="https://raw.githubusercontent.com/miyouzi/dnsmasq_sniproxy_install/main/proxy-domains.txt"
+LOG_DIR="/var/log/dns-proxy"
+DNSMASQ_CONFIG="/etc/dnsmasq.conf"
+SNIPROXY_CONFIG="/etc/sniproxy.conf"
+
+check_system() {
+    if [[ -f /etc/os-release ]]; then
+        . /etc/os-release
+        OS=$ID
+        VERSION=$VERSION_ID
+    else
+        echo -e "[${red}Error${plain}] 无法检测操作系统版本!"
+        exit 1
+    fi
+
+    case $OS in
+        ubuntu|debian)
+            PKG_MANAGER="apt-get"
+            PKG_UPDATE="apt-get update"
+            ;;
+        centos|rhel|fedora)
+            PKG_MANAGER="yum"
+            PKG_UPDATE="yum update"
+            ;;
+        *)
+            echo -e "[${red}Error${plain}] 不支持的操作系统: $OS"
             exit 1
+            ;;
+    esac
+}
+
+check_ports() {
+    local ports=(53 80 443)
+    local occupied=()
+
+    for port in "${ports[@]}"; do
+        if command -v lsof > /dev/null; then
+            if lsof -i :$port > /dev/null 2>&1; then
+                occupied+=($port)
+            fi
+        elif command -v ss > /dev/null; then
+            if ss -tuln | grep -q ":$port "; then
+                occupied+=($port)
+            fi
+        elif command -v netstat > /dev/null; then
+            if netstat -tuln | grep -q ":$port "; then
+                occupied+=($port)
+            fi
+        fi
+    done
+
+    if [ ${#occupied[@]} -gt 0 ]; then
+        echo -e "[${yellow}Warning${plain}] 以下端口被占用: ${occupied[@]}"
+        echo -e "是否尝试停止占用的服务? [y/N]"
+        read -r response
+        if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+            stop_conflicting_services
+        else
+            echo -e "[${red}Error${plain}] 端口被占用，无法继续安装。"
+            exit 1
+        fi
+    fi
+}
+
+stop_conflicting_services() {
+    local services=("systemd-resolved" "bind9" "named" "apache2" "nginx" "httpd")
+
+    for service in "${services[@]}"; do
+        if systemctl is-active --quiet $service; then
+            echo -e "[${green}Info${plain}] 停止服务: $service"
+            systemctl stop $service
+            systemctl disable $service 2>/dev/null
         fi
     done
 }
 
 get_external_ip() {
-    external_ip=$(curl -s -4 ip.sb)
-    echo "${external_ip}"
+    local ip_services=(
+        "https://api.ipify.org"
+        "https://icanhazip.com"
+        "https://ifconfig.me"
+        "https://ip.sb"
+    )
+
+    for service in "${ip_services[@]}"; do
+        external_ip=$(curl -s -4 --connect-timeout 5 $service)
+        if [[ $external_ip =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "${external_ip}"
+            return 0
+        fi
+    done
+
+    echo -e "[${red}Error${plain}] 无法获取外部IP地址"
+    exit 1
+}
+
+download_proxy_domains() {
+    echo -e "[${green}Info${plain}] 下载流媒体域名列表..."
+
+    if ! curl -s -L -o "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_URL}"; then
+        echo -e "[${yellow}Warning${plain}] 无法下载域名列表，使用本地文件"
+        if [ ! -f "${PROXY_DOMAINS_FILE}" ]; then
+            echo -e "[${red}Error${plain}] 本地域名列表文件不存在: ${PROXY_DOMAINS_FILE}"
+            return 1
+        fi
+    else
+        mv "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_FILE}"
+        echo -e "[${green}Info${plain}] 域名列表更新成功"
+    fi
+
+    return 0
+}
+
+install_dependencies() {
+    echo -e "[${green}Info${plain}] 安装依赖包..."
+
+    $PKG_UPDATE
+
+    local packages=("curl" "wget" "lsof" "iptables" "ipset")
+
+    for pkg in "${packages[@]}"; do
+        if ! command -v $pkg > /dev/null; then
+            echo -e "[${green}Info${plain}] 安装 $pkg..."
+            $PKG_MANAGER install -y $pkg
+        fi
+    done
 }
 
 install_dnsmasq() {
     external_ip=$(get_external_ip)
     echo -e "[${green}Info${plain}] 安装 dnsmasq..."
-    apt-get update && apt-get install -y dnsmasq
+    echo -e "[${green}Info${plain}] 服务器IP: ${external_ip}"
+
+    $PKG_MANAGER install -y dnsmasq
 
     echo -e "[${green}Info${plain}] 配置 dnsmasq..."
-    cat <<EOF > /etc/dnsmasq.conf
-listen-address=$external_ip
+
+    download_proxy_domains
+
+    cat <<EOF > $DNSMASQ_CONFIG
+# 基础配置
+user=nobody
+no-resolv
+no-poll
+expand-hosts
+listen-address=127.0.0.1,$external_ip
 bind-interfaces
+cache-size=10000
+min-cache-ttl=300
 
-# 代理所有域名，将所有请求解析到服务器的实际IP地址
-address=/#/$external_ip
-
-# 指定上游DNS服务器，处理非代理域名
+# 上游DNS服务器
 server=8.8.8.8
 server=8.8.4.4
+server=1.1.1.1
+server=1.0.0.1
+
+# 国内DNS服务器（用于国内域名）
+server=/cn/223.5.5.5
+server=/cn/119.29.29.29
+
+# 日志配置
+log-queries
+log-facility=/var/log/dns-proxy/dnsmasq.log
+
+# 流媒体域名解析配置
 EOF
+
+    if [ -f "${PROXY_DOMAINS_FILE}" ]; then
+        echo -e "[${green}Info${plain}] 添加流媒体域名解析规则..."
+        while IFS= read -r domain || [ -n "$domain" ]; do
+            [ -z "$domain" ] && continue
+            [[ $domain == \#* ]] && continue
+            echo "address=/${domain}/${external_ip}" >> $DNSMASQ_CONFIG
+        done < "${PROXY_DOMAINS_FILE}"
+    fi
+
+    mkdir -p $LOG_DIR
+    touch $LOG_DIR/dnsmasq.log
+    chown nobody:nogroup $LOG_DIR/dnsmasq.log
 
     systemctl enable dnsmasq
     systemctl restart dnsmasq
 
-    echo -e "[${green}Info${plain}] dnsmasq 安装并配置完成。"
+    if systemctl is-active --quiet dnsmasq; then
+        echo -e "[${green}Success${plain}] dnsmasq 安装并启动成功"
+    else
+        echo -e "[${red}Error${plain}] dnsmasq 启动失败"
+        systemctl status dnsmasq
+        exit 1
+    fi
 }
 
 install_sniproxy() {
     external_ip=$(get_external_ip)
     echo -e "[${green}Info${plain}] 安装 sniproxy..."
-    apt-get install -y sniproxy
+
+    if [ "$OS" == "ubuntu" ] || [ "$OS" == "debian" ]; then
+        $PKG_MANAGER install -y sniproxy
+    else
+        echo -e "[${green}Info${plain}] 从源码编译安装 sniproxy..."
+        $PKG_MANAGER install -y gcc make autoconf automake libtool gettext libev-devel pcre-devel udns-devel
+
+        cd /tmp
+        git clone https://github.com/dlundquist/sniproxy.git
+        cd sniproxy
+        ./autogen.sh
+        ./configure
+        make && make install
+
+        cat <<EOF > /etc/systemd/system/sniproxy.service
+[Unit]
+Description=SNI Proxy
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/local/sbin/sniproxy -c /etc/sniproxy.conf
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
 
     echo -e "[${green}Info${plain}] 配置 sniproxy..."
-    cat <<EOF > /etc/sniproxy.conf
+    cat <<EOF > $SNIPROXY_CONFIG
 user daemon
-pidfile /var/tmp/sniproxy.pid
+pidfile /var/run/sniproxy.pid
 
 error_log {
     syslog daemon
     priority notice
 }
 
+access_log {
+    filename $LOG_DIR/sniproxy_access.log
+    priority notice
+}
+
 resolver {
-    nameserver 8.8.8.8
-    nameserver 8.8.4.4
+    nameserver 127.0.0.1
     mode ipv4_only
 }
 
 listener $external_ip:80 {
     proto http
+
+    table {
+        .* *
+    }
+
     access_log {
-        filename /var/log/sniproxy/http_access.log
+        filename $LOG_DIR/http_access.log
         priority notice
     }
 }
 
 listener $external_ip:443 {
     proto tls
+
+    table {
+        .* *
+    }
+
     access_log {
-        filename /var/log/sniproxy/https_access.log
+        filename $LOG_DIR/https_access.log
         priority notice
     }
 }
-
-table {
-    .* *
-}
 EOF
 
-    # 创建日志目录
-    mkdir -p /var/log/sniproxy
+    mkdir -p $LOG_DIR
+    touch $LOG_DIR/sniproxy_access.log
+    touch $LOG_DIR/http_access.log
+    touch $LOG_DIR/https_access.log
 
     systemctl enable sniproxy
     systemctl restart sniproxy
 
-    echo -e "[${green}Info${plain}] sniproxy 安装并配置完成。"
+    if systemctl is-active --quiet sniproxy; then
+        echo -e "[${green}Success${plain}] sniproxy 安装并启动成功"
+    else
+        echo -e "[${red}Error${plain}] sniproxy 启动失败"
+        systemctl status sniproxy
+        exit 1
+    fi
+}
+
+configure_firewall() {
+    echo -e "[${green}Info${plain}] 配置防火墙规则..."
+
+    # 检查防火墙类型
+    if command -v ufw > /dev/null; then
+        echo -e "[${green}Info${plain}] 配置 UFW 防火墙..."
+        ufw allow 53/tcp
+        ufw allow 53/udp
+        ufw allow 80/tcp
+        ufw allow 443/tcp
+        ufw --force enable
+    elif command -v firewall-cmd > /dev/null; then
+        echo -e "[${green}Info${plain}] 配置 firewalld..."
+        firewall-cmd --permanent --add-service=dns
+        firewall-cmd --permanent --add-service=http
+        firewall-cmd --permanent --add-service=https
+        firewall-cmd --reload
+    else
+        echo -e "[${green}Info${plain}] 配置 iptables..."
+        iptables -I INPUT -p tcp --dport 53 -j ACCEPT
+        iptables -I INPUT -p udp --dport 53 -j ACCEPT
+        iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+        iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+
+        # 保存规则
+        if [ "$OS" == "ubuntu" ] || [ "$OS" == "debian" ]; then
+            $PKG_MANAGER install -y iptables-persistent
+            netfilter-persistent save
+        elif [ "$OS" == "centos" ] || [ "$OS" == "rhel" ]; then
+            service iptables save
+        fi
+    fi
+
+    echo -e "[${green}Success${plain}] 防火墙规则配置完成"
+}
+
+update_domains() {
+    echo -e "[${green}Info${plain}] 更新流媒体域名列表..."
+
+    if download_proxy_domains; then
+        install_dnsmasq
+        echo -e "[${green}Success${plain}] 域名列表更新完成"
+    else
+        echo -e "[${red}Error${plain}] 域名列表更新失败"
+        exit 1
+    fi
+}
+
+show_status() {
+    external_ip=$(get_external_ip)
+
+    echo -e "\n${blue}======== 服务状态 ========${plain}"
+
+    # DNSMasq 状态
+    if systemctl is-active --quiet dnsmasq; then
+        echo -e "DNSMasq: [${green}运行中${plain}]"
+    else
+        echo -e "DNSMasq: [${red}已停止${plain}]"
+    fi
+
+    # SNIProxy 状态
+    if systemctl is-active --quiet sniproxy; then
+        echo -e "SNIProxy: [${green}运行中${plain}]"
+    else
+        echo -e "SNIProxy: [${red}已停止${plain}]"
+    fi
+
+    echo -e "\n${blue}======== 配置信息 ========${plain}"
+    echo -e "服务器IP: ${green}${external_ip}${plain}"
+    echo -e "DNS端口: ${green}53${plain}"
+    echo -e "HTTP端口: ${green}80${plain}"
+    echo -e "HTTPS端口: ${green}443${plain}"
+
+    echo -e "\n${blue}======== 客户端配置 ========${plain}"
+    echo -e "将设备的DNS服务器设置为: ${green}${external_ip}${plain}"
+
+    if [ -f "${PROXY_DOMAINS_FILE}" ]; then
+        domain_count=$(grep -v '^#' "${PROXY_DOMAINS_FILE}" | grep -v '^$' | wc -l)
+        echo -e "已配置流媒体域名数: ${green}${domain_count}${plain}"
+    fi
+
+    echo -e "\n${blue}======== 日志文件 ========${plain}"
+    echo -e "DNSMasq日志: ${LOG_DIR}/dnsmasq.log"
+    echo -e "SNIProxy访问日志: ${LOG_DIR}/sniproxy_access.log"
+    echo -e "HTTP日志: ${LOG_DIR}/http_access.log"
+    echo -e "HTTPS日志: ${LOG_DIR}/https_access.log"
+}
+
+view_logs() {
+    echo -e "\n${blue}======== 选择要查看的日志 ========${plain}"
+    echo "1. DNSMasq 查询日志"
+    echo "2. SNIProxy 访问日志"
+    echo "3. HTTP 访问日志"
+    echo "4. HTTPS 访问日志"
+    echo "5. 返回主菜单"
+
+    read -p "请选择 [1-5]: " choice
+
+    case $choice in
+        1)
+            if [ -f "$LOG_DIR/dnsmasq.log" ]; then
+                tail -n 50 $LOG_DIR/dnsmasq.log
+            else
+                echo -e "[${red}Error${plain}] 日志文件不存在"
+            fi
+            ;;
+        2)
+            if [ -f "$LOG_DIR/sniproxy_access.log" ]; then
+                tail -n 50 $LOG_DIR/sniproxy_access.log
+            else
+                echo -e "[${red}Error${plain}] 日志文件不存在"
+            fi
+            ;;
+        3)
+            if [ -f "$LOG_DIR/http_access.log" ]; then
+                tail -n 50 $LOG_DIR/http_access.log
+            else
+                echo -e "[${red}Error${plain}] 日志文件不存在"
+            fi
+            ;;
+        4)
+            if [ -f "$LOG_DIR/https_access.log" ]; then
+                tail -n 50 $LOG_DIR/https_access.log
+            else
+                echo -e "[${red}Error${plain}] 日志文件不存在"
+            fi
+            ;;
+        5)
+            return
+            ;;
+        *)
+            echo -e "[${red}Error${plain}] 无效的选择"
+            ;;
+    esac
+}
+
+restart_services() {
+    echo -e "[${green}Info${plain}] 重启服务..."
+
+    systemctl restart dnsmasq
+    systemctl restart sniproxy
+
+    sleep 2
+
+    if systemctl is-active --quiet dnsmasq && systemctl is-active --quiet sniproxy; then
+        echo -e "[${green}Success${plain}] 服务重启成功"
+    else
+        echo -e "[${red}Error${plain}] 服务重启失败"
+        show_status
+        exit 1
+    fi
 }
 
 uninstall_all() {
-    echo -e "[${green}Info${plain}] 卸载 dnsmasq 和 sniproxy..."
-    systemctl stop dnsmasq sniproxy
-    apt-get remove --purge -y dnsmasq sniproxy
-    rm -f /etc/dnsmasq.conf /etc/sniproxy.conf
-    rm -rf /var/log/sniproxy
-    echo -e "[${green}Info${plain}] 卸载完成。"
+    echo -e "[${yellow}Warning${plain}] 确定要卸载所有组件吗? [y/N]"
+    read -r response
+
+    if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+        echo -e "[${green}Info${plain}] 取消卸载"
+        return
+    fi
+
+    echo -e "[${green}Info${plain}] 停止服务..."
+    systemctl stop dnsmasq sniproxy 2>/dev/null
+    systemctl disable dnsmasq sniproxy 2>/dev/null
+
+    echo -e "[${green}Info${plain}] 卸载软件包..."
+    if [ "$PKG_MANAGER" == "apt-get" ]; then
+        apt-get remove --purge -y dnsmasq sniproxy
+    else
+        yum remove -y dnsmasq sniproxy
+    fi
+
+    echo -e "[${green}Info${plain}] 清理配置文件..."
+    rm -f $DNSMASQ_CONFIG $SNIPROXY_CONFIG
+    rm -rf $LOG_DIR
+    rm -f /etc/systemd/system/sniproxy.service
+
+    echo -e "[${green}Success${plain}] 卸载完成"
 }
 
-show_help() {
-    echo "使用方法：bash $0 [-h] [-i] [-u]"
-    echo ""
-    echo "  -h , --help                显示帮助信息"
-    echo "  -i , --install             安装 dnsmasq 和 sniproxy 并配置所有域名代理"
-    echo "  -u , --uninstall           卸载 dnsmasq 和 sniproxy"
-    echo ""
-}
+setup_cron() {
+    echo -e "[${green}Info${plain}] 设置定时任务..."
 
-if [[ $# = 1 ]]; then
-    case $1 in
-        -i|--install)
-            check_ports
-            install_dnsmasq
-            install_sniproxy
-            ;;
-        -u|--uninstall)
-            uninstall_all
-            ;;
-        -h|--help|*)
-            show_help
-            ;;
-    esac
-else
-    show_help
+    # 创建更新脚本
+    cat <<'EOF' > /usr/local/bin/update-proxy-domains.sh
+#!/bin/bash
+PROXY_DOMAINS_URL="https://raw.githubusercontent.com/miyouzi/dnsmasq_sniproxy_install/main/proxy-domains.txt"
+PROXY_DOMAINS_FILE="/etc/dnsmasq.d/proxy-domains.txt"
+DNSMASQ_CONFIG="/etc/dnsmasq.conf"
+
+curl -s -L -o "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_URL}"
+if [ $? -eq 0 ]; then
+    mv "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_FILE}"
+    systemctl reload dnsmasq
 fi
+EOF
+
+    chmod +x /usr/local/bin/update-proxy-domains.sh
+
+    # 添加到crontab（每天凌晨3点更新）
+    (crontab -l 2>/dev/null | grep -v "update-proxy-domains.sh"; echo "0 3 * * * /usr/local/bin/update-proxy-domains.sh > /dev/null 2>&1") | crontab -
+
+    echo -e "[${green}Success${plain}] 定时任务设置完成（每天凌晨3点自动更新域名列表）"
+}
+
+show_menu() {
+    echo -e "\n${blue}======== DNS流媒体解锁服务 ========${plain}"
+    echo "1. 完整安装（DNSMasq + SNIProxy）"
+    echo "2. 仅安装 DNSMasq"
+    echo "3. 仅安装 SNIProxy"
+    echo "4. 更新流媒体域名列表"
+    echo "5. 查看服务状态"
+    echo "6. 查看日志"
+    echo "7. 重启服务"
+    echo "8. 设置定时更新"
+    echo "9. 卸载所有组件"
+    echo "0. 退出"
+    echo -e "${blue}====================================${plain}"
+}
+
+main() {
+    check_system
+
+    if [ $# -eq 0 ]; then
+        while true; do
+            show_menu
+            read -p "请选择 [0-9]: " choice
+
+            case $choice in
+                0)
+                    echo -e "[${green}Info${plain}] 退出脚本"
+                    exit 0
+                    ;;
+                1)
+                    check_ports
+                    install_dependencies
+                    install_dnsmasq
+                    install_sniproxy
+                    configure_firewall
+                    setup_cron
+                    show_status
+                    ;;
+                2)
+                    check_ports
+                    install_dependencies
+                    install_dnsmasq
+                    configure_firewall
+                    show_status
+                    ;;
+                3)
+                    check_ports
+                    install_dependencies
+                    install_sniproxy
+                    configure_firewall
+                    show_status
+                    ;;
+                4)
+                    update_domains
+                    ;;
+                5)
+                    show_status
+                    ;;
+                6)
+                    view_logs
+                    ;;
+                7)
+                    restart_services
+                    ;;
+                8)
+                    setup_cron
+                    ;;
+                9)
+                    uninstall_all
+                    ;;
+                *)
+                    echo -e "[${red}Error${plain}] 无效的选择"
+                    ;;
+            esac
+        done
+    else
+        case $1 in
+            -h|--help)
+                echo "使用方法: bash $0 [选项]"
+                echo ""
+                echo "选项:"
+                echo "  -h, --help        显示帮助信息"
+                echo "  -i, --install     完整安装"
+                echo "  -u, --uninstall   卸载所有组件"
+                echo "  -s, --status      查看服务状态"
+                echo "  -r, --restart     重启服务"
+                echo "  -d, --update      更新域名列表"
+                echo ""
+                ;;
+            -i|--install)
+                check_ports
+                install_dependencies
+                install_dnsmasq
+                install_sniproxy
+                configure_firewall
+                setup_cron
+                show_status
+                ;;
+            -u|--uninstall)
+                uninstall_all
+                ;;
+            -s|--status)
+                show_status
+                ;;
+            -r|--restart)
+                restart_services
+                ;;
+            -d|--update)
+                update_domains
+                ;;
+            *)
+                echo -e "[${red}Error${plain}] 无效的参数: $1"
+                echo "使用 $0 --help 查看帮助"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+main "$@"
