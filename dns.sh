@@ -240,7 +240,7 @@ install_sniproxy() {
 
     echo -e "[${green}Info${plain}] 配置 sniproxy..."
 
-    # 使用简化且稳定的配置
+    # 创建稳定的配置文件
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
 pidfile /var/run/sniproxy.pid
@@ -252,47 +252,35 @@ error_log {
 
 listener 0.0.0.0:80 {
     proto http
-    table all_hosts
+    table hosts
 }
 
 listener 0.0.0.0:443 {
     proto tls
-    table all_hosts
+    table hosts
 }
 
-table all_hosts {
+table hosts {
     .* *
 }
 EOF
 
-    # 修复systemd服务文件（如果需要）
-    if [ -f /lib/systemd/system/sniproxy.service ]; then
-        # 备份原文件
-        cp /lib/systemd/system/sniproxy.service /lib/systemd/system/sniproxy.service.bak
-
-        # 创建修正的服务文件
-        cat > /lib/systemd/system/sniproxy.service <<'EOF'
-[Unit]
-Description=HTTPS SNI Proxy
-After=network.target
-Documentation=man:sniproxy(8) file:///usr/share/doc/sniproxy/
-
+    # 创建systemd服务覆盖配置
+    mkdir -p /etc/systemd/system/sniproxy.service.d/
+    cat > /etc/systemd/system/sniproxy.service.d/override.conf <<'EOF'
 [Service]
 Type=forking
 PIDFile=/var/run/sniproxy.pid
-ExecStart=/usr/sbin/sniproxy
+ExecStartPre=/bin/rm -f /var/run/sniproxy.pid
+ExecStart=/usr/sbin/sniproxy -c /etc/sniproxy.conf
 ExecStop=/bin/kill -TERM $MAINPID
-ExecReload=/bin/kill -HUP $MAINPID
-KillMode=mixed
-KillSignal=SIGTERM
+ExecStopPost=/bin/rm -f /var/run/sniproxy.pid
+KillMode=control-group
+KillSignal=SIGKILL
 TimeoutStopSec=5
 Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+RestartSec=3
 EOF
-    fi
 
     # 重载systemd配置
     systemctl daemon-reload
@@ -306,14 +294,20 @@ EOF
 
     if systemctl is-active --quiet sniproxy; then
         echo -e "[${green}Success${plain}] sniproxy 安装并启动成功"
-        # 检查进程状态
-        ps aux | grep '[s]niproxy' | head -2
+        # 显示监听端口
+        echo -e "[${green}Info${plain}] SNIProxy监听端口:"
+        ss -tuln | grep -E ':80|:443' | grep LISTEN
     else
-        echo -e "[${yellow}Warning${plain}] sniproxy 启动可能有问题"
-        echo -e "[${yellow}提示${plain}] 检查端口: lsof -i :80 && lsof -i :443"
+        echo -e "[${yellow}Warning${plain}] sniproxy 服务状态异常，但可能已在运行"
 
-        # 显示错误信息
-        journalctl -u sniproxy -n 10 --no-pager
+        # 检查进程是否存在
+        if ps aux | grep -q '[s]niproxy'; then
+            echo -e "[${green}Info${plain}] SNIProxy进程已运行"
+            ps aux | grep '[s]niproxy' | head -2
+        else
+            echo -e "[${red}Error${plain}] SNIProxy启动失败"
+            journalctl -u sniproxy -n 10 --no-pager
+        fi
     fi
 }
 
@@ -480,67 +474,52 @@ show_menu() {
 fix_sniproxy() {
     echo -e "[${green}Info${plain}] 修复SNIProxy..."
 
-    # 彻底停止服务
+    # 停止服务
     systemctl stop sniproxy 2>/dev/null
-    systemctl kill sniproxy 2>/dev/null
+    systemctl kill -s KILL sniproxy 2>/dev/null
 
-    # 强制杀死所有sniproxy进程
-    echo -e "[${green}Info${plain}] 清理所有sniproxy进程..."
-    killall -9 sniproxy 2>/dev/null
-    pkill -9 sniproxy 2>/dev/null
+    # 获取所有sniproxy进程PID并杀死
+    echo -e "[${green}Info${plain}] 清理所有SNIProxy进程..."
+    for pid in $(ps aux | grep '[s]niproxy' | awk '{print $2}'); do
+        echo -e "  杀死进程: PID $pid"
+        kill -9 $pid 2>/dev/null
+    done
 
-    # 清理可能的PID文件
+    # 清理PID文件
     rm -f /var/run/sniproxy.pid
 
-    # 等待进程完全结束
-    sleep 3
+    sleep 2
 
-    # 详细检查端口占用
-    echo -e "[${green}Info${plain}] 检查端口占用情况..."
+    # 验证进程已清理
+    if ps aux | grep -q '[s]niproxy'; then
+        echo -e "[${yellow}Warning${plain}] 仍有SNIProxy进程残留"
+    else
+        echo -e "[${green}✓${plain}] 所有SNIProxy进程已清理"
+    fi
 
+    # 检查端口占用
+    echo -e "[${green}Info${plain}] 检查端口占用..."
     port_80_used=false
     port_443_used=false
 
-    # 检查80端口
-    if lsof -i :80 > /dev/null 2>&1; then
-        echo -e "[${yellow}Warning${plain}] 80端口被以下进程占用:"
-        lsof -i :80 | grep LISTEN
+    if lsof -i :80 | grep -q LISTEN; then
+        echo -e "[${yellow}Warning${plain}] 80端口被占用:"
+        lsof -i :80 | grep LISTEN | head -2
         port_80_used=true
     else
         echo -e "[${green}✓${plain}] 80端口可用"
     fi
 
-    # 检查443端口
-    if lsof -i :443 > /dev/null 2>&1; then
-        echo -e "[${yellow}Warning${plain}] 443端口被以下进程占用:"
-        lsof -i :443 | grep LISTEN
+    if lsof -i :443 | grep -q LISTEN; then
+        echo -e "[${yellow}Warning${plain}] 443端口被占用:"
+        lsof -i :443 | grep LISTEN | head -2
         port_443_used=true
     else
         echo -e "[${green}✓${plain}] 443端口可用"
     fi
 
-    # 如果端口被占用，询问是否强制停止
-    if [ "$port_80_used" = true ] || [ "$port_443_used" = true ]; then
-        echo -e "\n[${yellow}Warning${plain}] 检测到端口被占用"
-        echo -e "是否强制停止占用端口的服务? [y/N]"
-        read -r response
-        if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
-            # 停止常见的web服务
-            for service in nginx apache2 httpd caddy; do
-                if systemctl is-active --quiet $service; then
-                    echo -e "[${green}Info${plain}] 停止 $service..."
-                    systemctl stop $service
-                    systemctl disable $service 2>/dev/null
-                fi
-            done
-
-            # 再次等待
-            sleep 2
-        fi
-    fi
-
     # 创建配置文件
-    echo -e "[${green}Info${plain}] 创建SNIProxy配置..."
+    echo -e "[${green}Info${plain}] 创建配置文件..."
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
 pidfile /var/run/sniproxy.pid
@@ -552,81 +531,68 @@ error_log {
 
 listener 0.0.0.0:80 {
     proto http
-    table http_hosts
-
-    fallback 127.0.0.1:8080
+    table hosts
 }
 
 listener 0.0.0.0:443 {
     proto tls
-    table https_hosts
-
-    fallback 127.0.0.1:8443
+    table hosts
 }
 
-table http_hosts {
-    .* *
-}
-
-table https_hosts {
+table hosts {
     .* *
 }
 EOF
 
-    # 测试配置文件
-    echo -e "[${green}Info${plain}] 测试配置文件..."
-    if /usr/sbin/sniproxy -c /etc/sniproxy.conf -f -n 1 2>&1 | grep -q "error"; then
-        echo -e "[${red}Error${plain}] 配置文件有错误"
-
-        # 使用最简化配置
-        echo -e "[${green}Info${plain}] 使用最简化配置..."
-        cat > $SNIPROXY_CONFIG <<'EOF'
-user daemon
-
-listener 0.0.0.0:80 {
-    proto http
-}
-
-listener 0.0.0.0:443 {
-    proto tls
-}
-
-table {
-    .* *
-}
+    # 创建systemd服务覆盖
+    echo -e "[${green}Info${plain}] 修复systemd服务..."
+    mkdir -p /etc/systemd/system/sniproxy.service.d/
+    cat > /etc/systemd/system/sniproxy.service.d/override.conf <<'EOF'
+[Service]
+Type=forking
+PIDFile=/var/run/sniproxy.pid
+ExecStartPre=/bin/rm -f /var/run/sniproxy.pid
+ExecStart=/usr/sbin/sniproxy -c /etc/sniproxy.conf
+ExecStop=/bin/kill -TERM $MAINPID
+ExecStopPost=/bin/rm -f /var/run/sniproxy.pid
+KillMode=control-group
+KillSignal=SIGKILL
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=3
 EOF
-    fi
+
+    # 重载systemd
+    systemctl daemon-reload
 
     # 启动服务
     echo -e "[${green}Info${plain}] 启动SNIProxy服务..."
-    systemctl daemon-reload
+    systemctl enable sniproxy
     systemctl start sniproxy
 
-    # 等待服务启动
     sleep 2
 
-    # 检查服务状态
+    # 检查状态
     if systemctl is-active --quiet sniproxy; then
         echo -e "[${green}Success${plain}] SNIProxy修复成功!"
 
-        # 显示监听端口
-        echo -e "\n[${green}Info${plain}] SNIProxy监听端口:"
-        ss -tuln | grep -E ':80|:443' | grep LISTEN
+        echo -e "\n[${green}服务状态:${plain}]"
+        systemctl status sniproxy --no-pager | head -10
+
+        echo -e "\n[${green}监听端口:${plain}]"
+        ss -tuln | grep -E ':80|:443'
     else
-        echo -e "[${red}Error${plain}] SNIProxy启动失败"
+        echo -e "[${yellow}Warning${plain}] SNIProxy服务未正常运行"
 
-        # 显示详细错误
-        echo -e "\n[${yellow}Debug${plain}] 服务状态:"
-        systemctl status sniproxy --no-pager
-
-        echo -e "\n[${yellow}Debug${plain}] 系统日志:"
-        journalctl -u sniproxy -n 20 --no-pager
-
-        echo -e "\n[${yellow}提示${plain}] 可能的解决方案:"
-        echo -e "1. 检查80/443端口是否被占用: lsof -i :80 && lsof -i :443"
-        echo -e "2. 停止占用的服务: systemctl stop nginx apache2"
-        echo -e "3. 检查配置文件: cat /etc/sniproxy.conf"
-        echo -e "4. 手动测试: /usr/sbin/sniproxy -c /etc/sniproxy.conf -f"
+        # 检查进程是否存在
+        if ps aux | grep -q '[s]niproxy'; then
+            echo -e "[${green}Info${plain}] 但SNIProxy进程已存在并运行"
+            ps aux | grep '[s]niproxy'
+        else
+            echo -e "[${red}Error${plain}] SNIProxy启动失败"
+            echo -e "\n错误信息:"
+            journalctl -u sniproxy -n 15 --no-pager
+        fi
     fi
 }
 
