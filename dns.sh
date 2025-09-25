@@ -216,15 +216,31 @@ EOF
 install_sniproxy() {
     echo -e "[${green}Info${plain}] 安装 sniproxy..."
 
-    # 先清理残留进程
-    pkill -9 sniproxy 2>/dev/null
-    sleep 1
+    # 彻底清理所有sniproxy进程
+    echo -e "[${green}Info${plain}] 清理残留进程..."
+    systemctl stop sniproxy 2>/dev/null
+    systemctl kill -s KILL sniproxy 2>/dev/null
 
+    # 查找并杀死所有sniproxy进程
+    for pid in $(ps aux | grep '[s]niproxy' | awk '{print $2}'); do
+        kill -9 $pid 2>/dev/null
+    done
+
+    pkill -9 sniproxy 2>/dev/null
+    killall -9 sniproxy 2>/dev/null
+
+    # 清理PID文件
+    rm -f /var/run/sniproxy.pid
+
+    # 等待进程完全退出
+    sleep 2
+
+    # 安装sniproxy
     $PKG_MANAGER install -y sniproxy > /dev/null 2>&1
 
     echo -e "[${green}Info${plain}] 配置 sniproxy..."
 
-    # 创建正确的配置文件
+    # 使用简化且稳定的配置
     cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
 pidfile /var/run/sniproxy.pid
@@ -236,31 +252,68 @@ error_log {
 
 listener 0.0.0.0:80 {
     proto http
-    table http_hosts
+    table all_hosts
 }
 
 listener 0.0.0.0:443 {
     proto tls
-    table https_hosts
+    table all_hosts
 }
 
-table http_hosts {
-    .* *
-}
-
-table https_hosts {
+table all_hosts {
     .* *
 }
 EOF
 
+    # 修复systemd服务文件（如果需要）
+    if [ -f /lib/systemd/system/sniproxy.service ]; then
+        # 备份原文件
+        cp /lib/systemd/system/sniproxy.service /lib/systemd/system/sniproxy.service.bak
+
+        # 创建修正的服务文件
+        cat > /lib/systemd/system/sniproxy.service <<'EOF'
+[Unit]
+Description=HTTPS SNI Proxy
+After=network.target
+Documentation=man:sniproxy(8) file:///usr/share/doc/sniproxy/
+
+[Service]
+Type=forking
+PIDFile=/var/run/sniproxy.pid
+ExecStart=/usr/sbin/sniproxy
+ExecStop=/bin/kill -TERM $MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=5
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    # 重载systemd配置
+    systemctl daemon-reload
+
+    # 启用并启动服务
     systemctl enable sniproxy
     systemctl restart sniproxy
 
+    # 等待服务启动
+    sleep 2
+
     if systemctl is-active --quiet sniproxy; then
         echo -e "[${green}Success${plain}] sniproxy 安装并启动成功"
+        # 检查进程状态
+        ps aux | grep '[s]niproxy' | head -2
     else
-        echo -e "[${yellow}Warning${plain}] sniproxy 启动失败（端口可能被占用）"
-        echo -e "[${yellow}提示${plain}] 运行 'lsof -i :80' 和 'lsof -i :443' 查看端口占用"
+        echo -e "[${yellow}Warning${plain}] sniproxy 启动可能有问题"
+        echo -e "[${yellow}提示${plain}] 检查端口: lsof -i :80 && lsof -i :443"
+
+        # 显示错误信息
+        journalctl -u sniproxy -n 10 --no-pager
     fi
 }
 
