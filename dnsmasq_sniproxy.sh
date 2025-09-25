@@ -129,6 +129,7 @@ error_detect_depends(){
 }
 
 config_firewall(){
+    echo "配置防火墙规则..."
     if centosversion 6; then
         /etc/init.d/iptables status > /dev/null 2>&1
         if [ $? -eq 0 ]; then
@@ -138,11 +139,18 @@ config_firewall(){
                     iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${port} -j ACCEPT
                     if [ ${port} == "53" ]; then
                         iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${port} -j ACCEPT
+                        # 添加来源IP限制（可选）
+                        # iptables -I INPUT -s 192.168.0.0/16 -p udp --dport 53 -j ACCEPT
+                        # iptables -I INPUT -s 10.0.0.0/8 -p udp --dport 53 -j ACCEPT
                     fi
                 else
                     echo -e "[${green}Info${plain}] port ${green}${port}${plain} already be enabled."
                 fi
             done
+            # 防止DNS放大攻击
+            iptables -I INPUT -p udp --dport 53 -m string --algo bm --hex-string "|00000000000103697363036f726700|" -j DROP
+            iptables -I INPUT -p udp --dport 53 -m state --state NEW -m recent --set --name DNS --rsource
+            iptables -I INPUT -p udp --dport 53 -m state --state NEW -m recent --update --seconds 2 --hitcount 30 --name DNS --rsource -j DROP
             /etc/init.d/iptables save
             /etc/init.d/iptables restart
         else
@@ -157,12 +165,19 @@ config_firewall(){
                 if [ ${port} == "53" ]; then
                     firewall-cmd --permanent --zone=${default_zone} --add-port=${port}/udp
                 fi
-                firewall-cmd --reload
             done
+            # 添加DNS服务
+            firewall-cmd --permanent --zone=${default_zone} --add-service=dns
+            # 添加富规则以防止DNS放大攻击
+            firewall-cmd --permanent --zone=${default_zone} --add-rich-rule='rule family="ipv4" source address="192.168.0.0/16" service name="dns" accept'
+            firewall-cmd --permanent --zone=${default_zone} --add-rich-rule='rule family="ipv4" source address="10.0.0.0/8" service name="dns" accept'
+            firewall-cmd --permanent --zone=${default_zone} --add-rich-rule='rule family="ipv4" source address="172.16.0.0/12" service name="dns" accept'
+            firewall-cmd --reload
         else
             echo -e "[${yellow}Warning${plain}] firewalld looks like not running or not installed, please enable port ${ports} manually if necessary."
         fi
     fi
+    echo -e "[${green}Info${plain}] 防火墙配置完成."
 }
 
 install_dependencies(){
@@ -278,13 +293,84 @@ install_dnsmasq(){
         yes|cp -f /tmp/dnsmasq-2.90/src/dnsmasq /usr/sbin/dnsmasq && chmod +x /usr/sbin/dnsmasq
     fi
     [ ! -f /usr/sbin/dnsmasq ] && echo -e "[${red}Error${plain}] 安装dnsmasq出现问题，请检查." && exit 1
+
+    # 创建基础配置文件
+    cat > /etc/dnsmasq.d/base.conf << EOF
+# 监听所有网络接口
+interface=*
+listen-address=0.0.0.0
+
+# 绑定接口，防止DNS放大攻击
+bind-interfaces
+
+# DNS缓存大小设置
+cache-size=10000
+
+# 设置最小TTL值
+min-cache-ttl=300
+
+# 不转发不合法域名
+domain-needed
+bogus-priv
+
+# 上游DNS服务器配置
+server=8.8.8.8
+server=8.8.4.4
+server=1.1.1.1
+server=223.5.5.5
+server=119.29.29.29
+
+# 严格按照resolv.conf中的顺序进行查询
+strict-order
+
+# 并发查询所有上游DNS服务器
+all-servers
+
+# 不读取/etc/resolv.conf
+no-resolv
+
+# 扩展主机文件
+expand-hosts
+
+# 日志设置
+log-queries
+log-facility=/var/log/dnsmasq.log
+
+# DNS查询超时设置
+dns-forward-max=5000
+
+# 启用DNSSEC验证
+#dnssec
+#trust-anchor=.,19036,8,2,49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5
+#dnssec-check-unsigned
+EOF
+
     download /etc/dnsmasq.d/custom_netflix.conf https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/dnsmasq.conf
     download /tmp/proxy-domains.txt https://raw.githubusercontent.com/ridaiqianhe/dnsmasq/master/proxy-domains.txt
     for domain in $(cat /tmp/proxy-domains.txt); do
         printf "address=/${domain}/${publicip}\n"\
         | tee -a /etc/dnsmasq.d/custom_netflix.conf > /dev/null 2>&1
     done
+
+    # 添加自定义配置
+    cat > /etc/dnsmasq.d/custom.conf << EOF
+# 自定义域名解析
+# address=/example.com/192.168.1.100
+
+# 屏蔽广告域名示例
+# address=/doubleclick.net/0.0.0.0
+# address=/googleadservices.com/0.0.0.0
+
+# PTR记录自动生成
+# ptr-record=1.1.168.192.in-addr.arpa,router.local
+EOF
+
     [ "$(grep -x -E "(conf-dir=/etc/dnsmasq.d|conf-dir=/etc/dnsmasq.d,.bak|conf-dir=/etc/dnsmasq.d/,\*.conf|conf-dir=/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig)" /etc/dnsmasq.conf)" ] || echo -e "\nconf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
+
+    # 创建日志目录
+    mkdir -p /var/log
+    touch /var/log/dnsmasq.log
+    chmod 644 /var/log/dnsmasq.log
     echo "启动 Dnsmasq 服务..."
     if check_sys packageManager yum; then
         if centosversion 6; then
@@ -440,23 +526,33 @@ hello(){
     echo ""
     echo -e "${yellow}Dnsmasq + SNI Proxy自助安装脚本${plain}"
     echo -e "${yellow}支持系统:  CentOS 6+, Debian8+, Ubuntu16+${plain}"
+    echo -e "${green}增强版: 支持作为DNS服务器供其他机器使用${plain}"
     echo ""
 }
 
 help(){
     hello
-    echo "使用方法：bash $0 [-h] [-i] [-f] [-id] [-fd] [-is] [-fs] [-u] [-ud] [-us]"
+    echo "使用方法：bash $0 [-h] [-i] [-f] [-id] [-fd] [-is] [-fs] [-u] [-ud] [-us] [-c] [-s]"
     echo ""
     echo "  -h , --help                显示帮助信息"
     echo "  -i , --install             安装 Dnsmasq + SNI Proxy"
     echo "  -f , --fastinstall         快速安装 Dnsmasq + SNI Proxy"
     echo "  -id, --installdnsmasq      仅安装 Dnsmasq"
-    echo "  -id, --installdnsmasq      快速安装 Dnsmasq"
+    echo "  -fd, --fastinstalldnsmasq  快速安装 Dnsmasq"
     echo "  -is, --installsniproxy     仅安装 SNI Proxy"
     echo "  -fs, --fastinstallsniproxy 快速安装 SNI Proxy"
     echo "  -u , --uninstall           卸载 Dnsmasq + SNI Proxy"
     echo "  -ud, --undnsmasq           卸载 Dnsmasq"
     echo "  -us, --unsniproxy          卸载 SNI Proxy"
+    echo "  -c , --check               检查服务状态"
+    echo "  -s , --status              显示DNS统计信息"
+    echo ""
+    echo "配置其他机器使用此DNS服务器:"
+    echo "  1. 确保防火墙允许UDP 53端口"
+    echo "  2. 在客户端机器配置DNS为本机IP: $(get_ip)"
+    echo "  3. Windows: 网络设置 -> IPv4 -> DNS服务器"
+    echo "  4. Linux: 编辑 /etc/resolv.conf 添加 nameserver $(get_ip)"
+    echo "  5. macOS: 系统偏好设置 -> 网络 -> 高级 -> DNS"
     echo ""
 }
 
@@ -470,7 +566,22 @@ install_all(){
     echo ""
     echo -e "${yellow}Dnsmasq + SNI Proxy 已完成安装！${plain}"
     echo ""
-    echo -e "${yellow}将您的DNS更改为 $(get_ip) 即可以观看Netflix节目了。${plain}"
+    echo -e "${green}==================== DNS服务器配置信息 ====================${plain}"
+    echo -e "${yellow}DNS服务器IP: ${green}$(get_ip)${plain}"
+    echo -e "${yellow}监听端口: ${green}53 (UDP/TCP)${plain}"
+    echo -e "${yellow}上游DNS: ${green}8.8.8.8, 1.1.1.1, 223.5.5.5${plain}"
+    echo -e "${yellow}缓存大小: ${green}10000 条记录${plain}"
+    echo -e "${yellow}日志文件: ${green}/var/log/dnsmasq.log${plain}"
+    echo -e "${green}==========================================================${plain}"
+    echo ""
+    echo -e "${yellow}其他机器配置方法:${plain}"
+    echo -e "  1. ${green}Linux系统:${plain} echo 'nameserver $(get_ip)' >> /etc/resolv.conf"
+    echo -e "  2. ${green}Windows系统:${plain} 网络设置中将DNS服务器设置为 $(get_ip)"
+    echo -e "  3. ${green}路由器:${plain} 在DHCP设置中将DNS服务器设置为 $(get_ip)"
+    echo ""
+    echo -e "${yellow}测试命令:${plain}"
+    echo -e "  nslookup google.com $(get_ip)"
+    echo -e "  dig @$(get_ip) google.com"
     echo ""
 }
 
@@ -505,7 +616,15 @@ only_dnsmasq(){
     echo ""
     echo -e "${yellow}Dnsmasq 已完成安装！${plain}"
     echo ""
-    echo -e "${yellow}将您的DNS更改为 $(get_ip) 即可以观看Netflix节目了。${plain}"
+    echo -e "${green}==================== DNS服务器配置信息 ====================${plain}"
+    echo -e "${yellow}DNS服务器IP: ${green}$(get_ip)${plain}"
+    echo -e "${yellow}监听端口: ${green}53 (UDP/TCP)${plain}"
+    echo -e "${yellow}配置文件: ${green}/etc/dnsmasq.conf, /etc/dnsmasq.d/*.conf${plain}"
+    echo -e "${green}==========================================================${plain}"
+    echo ""
+    echo -e "${yellow}配置其他机器使用此DNS:${plain}"
+    echo -e "  ${green}临时生效:${plain} echo 'nameserver $(get_ip)' > /etc/resolv.conf"
+    echo -e "  ${green}永久生效:${plain} 编辑网络配置文件设置DNS为 $(get_ip)"
     echo ""
 }
 
@@ -582,6 +701,107 @@ unsniproxy(){
     echo -e "[${green}Info${plain}] services uninstall sniproxy complete..."
 }
 
+check_services(){
+    hello
+    echo -e "${yellow}检查服务状态...${plain}"
+    echo ""
+
+    # 检查 Dnsmasq 状态
+    echo -e "${green}========== Dnsmasq 服务状态 ==========${plain}"
+    if [ -f /usr/sbin/dnsmasq ]; then
+        if check_sys packageManager yum; then
+            if centosversion 6; then
+                service dnsmasq status
+            else
+                systemctl status dnsmasq --no-pager
+            fi
+        elif check_sys packageManager apt; then
+            systemctl status dnsmasq --no-pager
+        fi
+
+        # 检查端口监听
+        echo ""
+        echo -e "${yellow}DNS 端口监听状态:${plain}"
+        netstat -tunlp | grep :53
+    else
+        echo -e "${red}Dnsmasq 未安装${plain}"
+    fi
+
+    echo ""
+    echo -e "${green}========== SNI Proxy 服务状态 ==========${plain}"
+    if [ -f /usr/sbin/sniproxy ]; then
+        if check_sys packageManager yum; then
+            if centosversion 6; then
+                service sniproxy status
+            else
+                systemctl status sniproxy --no-pager
+            fi
+        elif check_sys packageManager apt; then
+            systemctl status sniproxy --no-pager
+        fi
+
+        # 检查端口监听
+        echo ""
+        echo -e "${yellow}HTTP/HTTPS 端口监听状态:${plain}"
+        netstat -tunlp | grep -E ':80|:443'
+    else
+        echo -e "${red}SNI Proxy 未安装${plain}"
+    fi
+
+    echo ""
+    echo -e "${green}========== 系统信息 ==========${plain}"
+    echo -e "${yellow}系统IP地址:${plain} $(get_ip)"
+    echo -e "${yellow}系统版本:${plain} $(cat /etc/*release | head -n 1)"
+    echo -e "${yellow}内核版本:${plain} $(uname -r)"
+    echo ""
+}
+
+show_dns_stats(){
+    hello
+    echo -e "${yellow}DNS 统计信息...${plain}"
+    echo ""
+
+    if [ ! -f /usr/sbin/dnsmasq ]; then
+        echo -e "${red}Dnsmasq 未安装${plain}"
+        return 1
+    fi
+
+    # 发送 USR1 信号让 dnsmasq 输出统计信息
+    if check_sys packageManager yum; then
+        if centosversion 6; then
+            killall -USR1 dnsmasq 2>/dev/null
+        else
+            systemctl kill -s USR1 dnsmasq 2>/dev/null
+        fi
+    elif check_sys packageManager apt; then
+        systemctl kill -s USR1 dnsmasq 2>/dev/null
+    fi
+
+    sleep 1
+
+    echo -e "${green}========== DNS 查询统计 ==========${plain}"
+    if [ -f /var/log/dnsmasq.log ]; then
+        echo -e "${yellow}最近的DNS查询记录:${plain}"
+        tail -n 20 /var/log/dnsmasq.log
+        echo ""
+        echo -e "${yellow}今日查询统计:${plain}"
+        today=$(date +%b\ %d)
+        echo "总查询数: $(grep "$today" /var/log/dnsmasq.log 2>/dev/null | wc -l)"
+        echo "缓存命中: $(grep "$today.*cached" /var/log/dnsmasq.log 2>/dev/null | wc -l)"
+        echo "转发查询: $(grep "$today.*forwarded" /var/log/dnsmasq.log 2>/dev/null | wc -l)"
+        echo ""
+        echo -e "${yellow}热门查询域名 (Top 10):${plain}"
+        grep "$today.*query" /var/log/dnsmasq.log 2>/dev/null | awk '{print $6}' | sort | uniq -c | sort -rn | head -10
+    else
+        echo -e "${yellow}日志文件不存在，请检查dnsmasq配置${plain}"
+    fi
+
+    echo ""
+    echo -e "${green}========== 系统资源使用 ==========${plain}"
+    ps aux | grep -E "dnsmasq|sniproxy" | grep -v grep
+    echo ""
+}
+
 confirm(){
     echo -e "${yellow}是否继续执行?(n:取消/y:继续)${plain}"
     read -e -p "(默认:取消): " selection
@@ -636,6 +856,12 @@ if [[ $# = 1 ]];then
         echo -e "${yellow}正在执行卸载SNI Proxy.${plain}"
         confirm
         unsniproxy
+        ;;
+        -c|--check)
+        check_services
+        ;;
+        -s|--status)
+        show_dns_stats
         ;;
         -h|--help|*)
         help
