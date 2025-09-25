@@ -346,27 +346,69 @@ uninstall_all() {
         return
     fi
 
-    echo -e "[${green}Info${plain}] 停止服务..."
-    systemctl stop dnsmasq sniproxy 2>/dev/null
-    systemctl disable dnsmasq sniproxy 2>/dev/null
+    echo -e "[${green}Info${plain}] 彻底停止所有服务..."
+
+    # 停止并禁用服务
+    systemctl stop dnsmasq 2>/dev/null
+    systemctl stop sniproxy 2>/dev/null
+    systemctl disable dnsmasq 2>/dev/null
+    systemctl disable sniproxy 2>/dev/null
+
+    # 强制杀死所有相关进程
+    pkill -9 dnsmasq 2>/dev/null
     pkill -9 sniproxy 2>/dev/null
+    killall -9 sniproxy 2>/dev/null
+    killall -9 dnsmasq 2>/dev/null
 
     echo -e "[${green}Info${plain}] 卸载软件包..."
     if [ "$PKG_MANAGER" == "apt-get" ]; then
-        apt-get remove --purge -y dnsmasq sniproxy
+        apt-get remove --purge -y dnsmasq sniproxy dnsmasq-base
+        # 清理依赖包
+        apt-get autoremove -y
     else
         yum remove -y dnsmasq sniproxy
+        yum autoremove -y
     fi
 
-    echo -e "[${green}Info${plain}] 清理配置文件..."
-    rm -f $DNSMASQ_CONFIG $SNIPROXY_CONFIG
-    rm -rf $LOG_DIR
+    echo -e "[${green}Info${plain}] 彻底清理所有配置和日志文件..."
 
-    # 恢复DNS
-    echo "nameserver 8.8.8.8" > /etc/resolv.conf
-    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    # 清理配置文件
+    rm -f /etc/dnsmasq.conf
+    rm -f /etc/sniproxy.conf
+    rm -rf /etc/dnsmasq.d
 
-    echo -e "[${green}Success${plain}] 卸载完成"
+    # 清理日志文件
+    rm -rf /var/log/dnsmasq*
+    rm -rf /var/log/sniproxy*
+    rm -rf /var/log/dns-proxy
+
+    # 清理运行时文件
+    rm -f /var/run/dnsmasq.pid
+    rm -f /var/run/sniproxy.pid
+
+    # 清理systemd残留
+    rm -f /etc/systemd/system/sniproxy.service
+    rm -f /etc/systemd/system/dnsmasq.service
+    rm -f /lib/systemd/system/sniproxy.service
+    rm -f /lib/systemd/system/dnsmasq.service
+    systemctl daemon-reload
+
+    # 恢复DNS解析
+    echo -e "[${green}Info${plain}] 恢复系统DNS设置..."
+    chattr -i /etc/resolv.conf 2>/dev/null
+    cat > /etc/resolv.conf <<EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 8.8.4.4
+EOF
+
+    # 恢复systemd-resolved（如果系统支持）
+    if systemctl list-unit-files | grep -q systemd-resolved; then
+        systemctl enable systemd-resolved 2>/dev/null
+        systemctl start systemd-resolved 2>/dev/null
+    fi
+
+    echo -e "[${green}Success${plain}] 卸载完成！所有组件已彻底清理"
 }
 
 show_menu() {
