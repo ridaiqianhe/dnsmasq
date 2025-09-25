@@ -206,38 +206,12 @@ install_sniproxy() {
     external_ip=$(get_external_ip)
     echo -e "[${green}Info${plain}] 安装 sniproxy..."
 
-    if [ "$OS" == "ubuntu" ] || [ "$OS" == "debian" ]; then
-        $PKG_MANAGER install -y sniproxy
-    else
-        echo -e "[${green}Info${plain}] 从源码编译安装 sniproxy..."
-        $PKG_MANAGER install -y gcc make autoconf automake libtool gettext libev-devel pcre-devel udns-devel
-
-        cd /tmp
-        git clone https://github.com/dlundquist/sniproxy.git
-        cd sniproxy
-        ./autogen.sh
-        ./configure
-        make && make install
-
-        cat <<EOF > /etc/systemd/system/sniproxy.service
-[Unit]
-Description=SNI Proxy
-After=network.target
-
-[Service]
-Type=forking
-ExecStart=/usr/local/sbin/sniproxy -c /etc/sniproxy.conf
-ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    fi
+    $PKG_MANAGER install -y sniproxy
 
     echo -e "[${green}Info${plain}] 配置 sniproxy..."
-    cat <<EOF > $SNIPROXY_CONFIG
+
+    # 创建正确的sniproxy配置文件
+    cat > $SNIPROXY_CONFIG <<'EOF'
 user daemon
 pidfile /var/run/sniproxy.pid
 
@@ -246,47 +220,26 @@ error_log {
     priority notice
 }
 
-access_log {
-    filename $LOG_DIR/sniproxy_access.log
-    priority notice
-}
-
-resolver {
-    nameserver 127.0.0.1
-    mode ipv4_only
-}
-
-listener $external_ip:80 {
+listener 0.0.0.0:80 {
     proto http
-
-    table {
-        .* *
-    }
-
-    access_log {
-        filename $LOG_DIR/http_access.log
-        priority notice
-    }
+    table http_hosts
 }
 
-listener $external_ip:443 {
+listener 0.0.0.0:443 {
     proto tls
+    table https_hosts
+}
 
-    table {
-        .* *
-    }
+table http_hosts {
+    .* *
+}
 
-    access_log {
-        filename $LOG_DIR/https_access.log
-        priority notice
-    }
+table https_hosts {
+    .* *
 }
 EOF
 
     mkdir -p $LOG_DIR
-    touch $LOG_DIR/sniproxy_access.log
-    touch $LOG_DIR/http_access.log
-    touch $LOG_DIR/https_access.log
 
     systemctl enable sniproxy
     systemctl restart sniproxy
@@ -294,9 +247,8 @@ EOF
     if systemctl is-active --quiet sniproxy; then
         echo -e "[${green}Success${plain}] sniproxy 安装并启动成功"
     else
-        echo -e "[${red}Error${plain}] sniproxy 启动失败"
-        systemctl status sniproxy
-        exit 1
+        echo -e "[${yellow}Warning${plain}] sniproxy 启动失败（可能443端口被占用）"
+        echo -e "[${yellow}Info${plain}] 如需HTTPS代理，请手动停止占用443端口的服务"
     fi
 }
 
@@ -334,18 +286,6 @@ configure_firewall() {
     fi
 
     echo -e "[${green}Success${plain}] 防火墙规则配置完成"
-}
-
-update_domains() {
-    echo -e "[${green}Info${plain}] 更新流媒体域名列表..."
-
-    if download_proxy_domains; then
-        install_dnsmasq
-        echo -e "[${green}Success${plain}] 域名列表更新完成"
-    else
-        echo -e "[${red}Error${plain}] 域名列表更新失败"
-        exit 1
-    fi
 }
 
 show_status() {
@@ -386,54 +326,6 @@ show_status() {
     echo -e "SNIProxy访问日志: ${LOG_DIR}/sniproxy_access.log"
     echo -e "HTTP日志: ${LOG_DIR}/http_access.log"
     echo -e "HTTPS日志: ${LOG_DIR}/https_access.log"
-}
-
-view_logs() {
-    echo -e "\n${blue}======== 选择要查看的日志 ========${plain}"
-    echo "1. DNSMasq 查询日志"
-    echo "2. SNIProxy 访问日志"
-    echo "3. HTTP 访问日志"
-    echo "4. HTTPS 访问日志"
-    echo "5. 返回主菜单"
-
-    read -p "请选择 [1-5]: " choice
-
-    case $choice in
-        1)
-            if [ -f "$LOG_DIR/dnsmasq.log" ]; then
-                tail -n 50 $LOG_DIR/dnsmasq.log
-            else
-                echo -e "[${red}Error${plain}] 日志文件不存在"
-            fi
-            ;;
-        2)
-            if [ -f "$LOG_DIR/sniproxy_access.log" ]; then
-                tail -n 50 $LOG_DIR/sniproxy_access.log
-            else
-                echo -e "[${red}Error${plain}] 日志文件不存在"
-            fi
-            ;;
-        3)
-            if [ -f "$LOG_DIR/http_access.log" ]; then
-                tail -n 50 $LOG_DIR/http_access.log
-            else
-                echo -e "[${red}Error${plain}] 日志文件不存在"
-            fi
-            ;;
-        4)
-            if [ -f "$LOG_DIR/https_access.log" ]; then
-                tail -n 50 $LOG_DIR/https_access.log
-            else
-                echo -e "[${red}Error${plain}] 日志文件不存在"
-            fi
-            ;;
-        5)
-            return
-            ;;
-        *)
-            echo -e "[${red}Error${plain}] 无效的选择"
-            ;;
-    esac
 }
 
 restart_services() {
@@ -481,42 +373,15 @@ uninstall_all() {
     echo -e "[${green}Success${plain}] 卸载完成"
 }
 
-setup_cron() {
-    echo -e "[${green}Info${plain}] 设置定时任务..."
-
-    # 创建更新脚本
-    cat <<'EOF' > /usr/local/bin/update-proxy-domains.sh
-#!/bin/bash
-PROXY_DOMAINS_URL="https://raw.githubusercontent.com/miyouzi/dnsmasq_sniproxy_install/main/proxy-domains.txt"
-PROXY_DOMAINS_FILE="/etc/dnsmasq.d/proxy-domains.txt"
-DNSMASQ_CONFIG="/etc/dnsmasq.conf"
-
-curl -s -L -o "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_URL}"
-if [ $? -eq 0 ]; then
-    mv "${PROXY_DOMAINS_FILE}.tmp" "${PROXY_DOMAINS_FILE}"
-    systemctl reload dnsmasq
-fi
-EOF
-
-    chmod +x /usr/local/bin/update-proxy-domains.sh
-
-    # 添加到crontab（每天凌晨3点更新）
-    (crontab -l 2>/dev/null | grep -v "update-proxy-domains.sh"; echo "0 3 * * * /usr/local/bin/update-proxy-domains.sh > /dev/null 2>&1") | crontab -
-
-    echo -e "[${green}Success${plain}] 定时任务设置完成（每天凌晨3点自动更新域名列表）"
-}
 
 show_menu() {
     echo -e "\n${blue}======== DNS流媒体解锁服务 ========${plain}"
     echo "1. 完整安装（DNSMasq + SNIProxy）"
     echo "2. 仅安装 DNSMasq"
     echo "3. 仅安装 SNIProxy"
-    echo "4. 更新流媒体域名列表"
-    echo "5. 查看服务状态"
-    echo "6. 查看日志"
-    echo "7. 重启服务"
-    echo "8. 设置定时更新"
-    echo "9. 卸载所有组件"
+    echo "4. 查看服务状态"
+    echo "5. 重启服务"
+    echo "6. 卸载所有组件"
     echo "0. 退出"
     echo -e "${blue}====================================${plain}"
 }
@@ -527,7 +392,7 @@ main() {
     if [ $# -eq 0 ]; then
         while true; do
             show_menu
-            read -p "请选择 [0-9]: " choice
+            read -p "请选择 [0-6]: " choice
 
             case $choice in
                 0)
@@ -540,7 +405,6 @@ main() {
                     install_dnsmasq
                     install_sniproxy
                     configure_firewall
-                    setup_cron
                     show_status
                     ;;
                 2)
@@ -558,21 +422,12 @@ main() {
                     show_status
                     ;;
                 4)
-                    update_domains
-                    ;;
-                5)
                     show_status
                     ;;
-                6)
-                    view_logs
-                    ;;
-                7)
+                5)
                     restart_services
                     ;;
-                8)
-                    setup_cron
-                    ;;
-                9)
+                6)
                     uninstall_all
                     ;;
                 *)
