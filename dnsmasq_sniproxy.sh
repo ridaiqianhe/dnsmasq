@@ -107,29 +107,6 @@ check_ip(){
     fi
 }
 
-safe_restart_service(){
-    local service_name=$1
-    if [ -z "$service_name" ]; then
-        echo -e "[${red}Error${plain}] Service name cannot be empty"
-        return 1
-    fi
-    
-    # Check if service exists
-    if ! systemctl list-unit-files | grep -q "^${service_name}.service"; then
-        echo -e "[${red}Error${plain}] Service ${service_name}.service does not exist"
-        return 1
-    fi
-    
-    echo -e "[${yellow}Info${plain}] Restarting ${service_name} service..."
-    if systemctl restart "${service_name}"; then
-        echo -e "[${green}Info${plain}] ${service_name} service restarted successfully"
-        return 0
-    else
-        echo -e "[${red}Error${plain}] Failed to restart ${service_name} service"
-        return 1
-    fi
-}
-
 download(){
     local filename=${1}
     echo -e "[${green}Info${plain}] ${filename} download configuration now..."
@@ -229,11 +206,11 @@ install_dependencies(){
     elif check_sys packageManager apt; then
         if [[ ${fastmode} = "1" ]]; then
             apt_depends=(
-                curl gettext libev-dev  libudns-dev
+                curl gettext libev-dev libpcre3-dev libudns-dev
             )
         else
             apt_depends=(
-                autotools-dev cdbs curl gettext libev-dev  libudns-dev autoconf devscripts
+                autotools-dev cdbs curl gettext libev-dev libpcre3-dev libudns-dev autoconf devscripts
             )
         fi
         apt-get -y update
@@ -307,10 +284,7 @@ install_dnsmasq(){
         printf "address=/${domain}/${publicip}\n"\
         | tee -a /etc/dnsmasq.d/custom_netflix.conf > /dev/null 2>&1
     done
-    # Check if conf-dir already exists, if not add it
-    if ! grep -q "^conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf; then
-        echo -e "\nconf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
-    fi
+    [ "$(grep -x -E "(conf-dir=/etc/dnsmasq.d|conf-dir=/etc/dnsmasq.d,.bak|conf-dir=/etc/dnsmasq.d/,\*.conf|conf-dir=/etc/dnsmasq.d,.rpmnew,.rpmsave,.rpmorig)" /etc/dnsmasq.conf)" ] || echo -e "\nconf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
     echo "启动 Dnsmasq 服务..."
     if check_sys packageManager yum; then
         if centosversion 6; then
@@ -327,10 +301,7 @@ install_dnsmasq(){
             echo "IGNORE_RESOLVCONF=yes" >> /etc/default/dnsmasq
         fi
         systemctl enable dnsmasq
-        if ! safe_restart_service dnsmasq; then
-            echo -e "[${yellow}Warning${plain}] Check configuration with: dnsmasq --test"
-            exit 1
-        fi
+        systemctl restart dnsmasq
     fi
     cd /tmp
     rm -rf /tmp/dnsmasq-2.91 /tmp/dnsmasq-2.91.tar.gz /tmp/proxy-domains.txt
@@ -425,10 +396,7 @@ install_sniproxy(){
         fi
     elif check_sys packageManager apt; then
         systemctl enable sniproxy > /dev/null 2>&1
-        if ! safe_restart_service sniproxy; then
-            echo -e "[${yellow}Warning${plain}] Check configuration with: sniproxy -t"
-            exit 1
-        fi
+        systemctl restart sniproxy || (echo -e "[${red}Error:${plain}] Failed to start sniproxy." && exit 1)
     fi
     cd /tmp
     rm -rf /tmp/sniproxy-0.6.1/
