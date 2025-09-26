@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# SNIProxy & DNSMasq Interactive Installation Script v2.0
-# Support for streaming services proxy configuration
+# SNIProxy & DNSMasq Interactive Installation Script v2.1
+# Fixed display issues and improved error handling
 
 set -e
 
@@ -69,10 +69,13 @@ detect_os() {
 show_banner() {
     clear
     echo -e "${BCyan}╔══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BCyan}║${NC} ${BWhite}     SNIProxy & DNSMasq 流媒体代理安装工具 v2.0${NC}        ${BCyan}║${NC}"
+    echo -e "${BCyan}║${NC} ${BWhite}     SNIProxy & DNSMasq 流媒体代理安装工具 v2.1${NC}        ${BCyan}║${NC}"
     echo -e "${BCyan}╠══════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${BCyan}║${NC} ${WHITE}系统: ${GREEN}$OS $VER${NC}                                          ${BCyan}║${NC}"
-    echo -e "${BCyan}║${NC} ${WHITE}包管理器: ${GREEN}$PKG_MANAGER${NC}                                           ${BCyan}║${NC}"
+    # Format OS and version display
+    OS_DISPLAY=$(printf "%-20s" "$OS $VER")
+    PKG_DISPLAY=$(printf "%-10s" "$PKG_MANAGER")
+    echo -e "${BCyan}║${NC} ${WHITE}系统: ${GREEN}${OS_DISPLAY}${NC}                           ${BCyan}║${NC}"
+    echo -e "${BCyan}║${NC} ${WHITE}包管理器: ${GREEN}${PKG_DISPLAY}${NC}                               ${BCyan}║${NC}"
     echo -e "${BCyan}╚══════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
@@ -80,7 +83,7 @@ show_banner() {
 # Get system status
 get_status() {
     # Check SNIProxy status
-    if systemctl is-active --quiet sniproxy; then
+    if systemctl is-active --quiet sniproxy 2>/dev/null; then
         SNIPROXY_STATUS="${BGreen}运行中${NC}"
     elif systemctl is-enabled --quiet sniproxy 2>/dev/null; then
         SNIPROXY_STATUS="${BYellow}已停止${NC}"
@@ -89,7 +92,7 @@ get_status() {
     fi
 
     # Check DNSMasq status
-    if systemctl is-active --quiet dnsmasq; then
+    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
         DNSMASQ_STATUS="${BGreen}运行中${NC}"
     elif systemctl is-enabled --quiet dnsmasq 2>/dev/null; then
         DNSMASQ_STATUS="${BYellow}已停止${NC}"
@@ -97,8 +100,18 @@ get_status() {
         DNSMASQ_STATUS="${BRed}未安装${NC}"
     fi
 
-    # Get IP address
-    SERVER_IP=$(ip -4 addr show | grep inet | grep -v 127.0.0.1 | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    # Get IP address - improved detection
+    SERVER_IP=""
+    # Try different methods to get IP
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(ip -4 addr show | grep -oE 'inet [0-9.]+' | grep -v '127.0.0.1' | awk '{print $2}' | head -n1)
+    fi
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+    if [ -z "$SERVER_IP" ]; then
+        SERVER_IP=$(curl -s ifconfig.me 2>/dev/null || echo "无法检测")
+    fi
 }
 
 # Install sniproxy from package or source
@@ -116,23 +129,14 @@ install_sniproxy() {
             1)
                 echo -e "${BGreen}从 APT 仓库安装...${NC}"
                 apt update
-                apt install -y sniproxy
+                # Try to install sniproxy from apt, if fails, compile from source
+                if ! apt install -y sniproxy 2>/dev/null; then
+                    echo -e "${BYellow}APT 仓库中没有找到 sniproxy，自动切换到源码编译...${NC}"
+                    install_sniproxy_from_source
+                fi
                 ;;
             2)
-                echo -e "${BGreen}从源码编译安装...${NC}"
-                apt update
-                apt install -y autotools-dev cdbs debhelper dh-autoreconf dpkg-dev \
-                    gettext libev-dev libudns-dev pkg-config fakeroot devscripts \
-                    autoconf build-essential
-
-                cd /tmp
-                wget https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
-                tar -zxf 0.6.1.tar.gz
-                cd sniproxy-0.6.1
-                ./autogen.sh && dpkg-buildpackage
-                dpkg -i ../sniproxy_*.deb
-                cd /
-                rm -rf /tmp/sniproxy*
+                install_sniproxy_from_source
                 ;;
             3)
                 echo -e "${BGreen}从预编译包安装...${NC}"
@@ -153,22 +157,52 @@ install_sniproxy() {
         esac
     else
         # For CentOS/RHEL
-        echo -e "${BGreen}安装编译依赖...${NC}"
-        yum install -y epel-release
-        yum install -y autoconf automake curl gettext-devel libev-devel \
-            pcre-devel perl pkgconfig rpm-build udns-devel gcc-c++ make
-
-        echo -e "${BGreen}从源码编译安装...${NC}"
-        cd /tmp
-        wget https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
-        tar -zxf 0.6.1.tar.gz
-        cd sniproxy-0.6.1
-        ./autogen.sh && ./configure && make && make install
-        cd /
-        rm -rf /tmp/sniproxy*
+        install_sniproxy_from_source
     fi
 
     echo -e "${BGreen}SNIProxy 安装完成${NC}"
+}
+
+# Install sniproxy from source
+install_sniproxy_from_source() {
+    echo -e "${BGreen}从源码编译安装...${NC}"
+
+    if [ "$PKG_MANAGER" = "apt" ]; then
+        apt update
+        apt install -y autotools-dev cdbs debhelper dh-autoreconf dpkg-dev \
+            gettext libev-dev libudns-dev pkg-config fakeroot devscripts \
+            autoconf build-essential git
+    else
+        yum install -y epel-release
+        yum install -y autoconf automake curl gettext-devel libev-devel \
+            pcre-devel perl pkgconfig rpm-build udns-devel gcc-c++ make git
+    fi
+
+    cd /tmp
+    rm -rf sniproxy*
+
+    # Try to clone from git first
+    if ! git clone https://github.com/dlundquist/sniproxy.git 2>/dev/null; then
+        # Fallback to wget
+        wget https://github.com/dlundquist/sniproxy/archive/refs/tags/0.6.1.tar.gz
+        tar -zxf 0.6.1.tar.gz
+        cd sniproxy-0.6.1
+    else
+        cd sniproxy
+    fi
+
+    ./autogen.sh
+    ./configure
+    make
+    make install
+
+    # Create binary link if not exists
+    if [ ! -f /usr/sbin/sniproxy ]; then
+        ln -s /usr/local/sbin/sniproxy /usr/sbin/sniproxy 2>/dev/null || true
+    fi
+
+    cd /
+    rm -rf /tmp/sniproxy*
 }
 
 # Configure sniproxy
@@ -218,18 +252,24 @@ EOF
 
     # Create log directory
     mkdir -p /var/log/sniproxy
+    touch /var/log/sniproxy/http_access.log
+    touch /var/log/sniproxy/https_access.log
+    chmod 755 /var/log/sniproxy
 
     # Create systemd service if not exists
     if [ ! -f /etc/systemd/system/sniproxy.service ] && [ ! -f /lib/systemd/system/sniproxy.service ]; then
-        cat > /etc/systemd/system/sniproxy.service << 'EOF'
+        # Find sniproxy binary path
+        SNIPROXY_BIN=$(which sniproxy 2>/dev/null || echo "/usr/sbin/sniproxy")
+
+        cat > /etc/systemd/system/sniproxy.service << EOF
 [Unit]
 Description=SNI Proxy
 After=network.target
 
 [Service]
 Type=forking
-ExecStart=/usr/sbin/sniproxy -c /etc/sniproxy.conf
-ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=${SNIPROXY_BIN} -c /etc/sniproxy.conf
+ExecReload=/bin/kill -HUP \$MAINPID
 PIDFile=/var/run/sniproxy.pid
 Restart=on-failure
 RestartSec=5
@@ -296,6 +336,11 @@ EOF
 configure_dnsmasq() {
     echo -e "${BGreen}配置 DNSMasq...${NC}"
 
+    # Get current server IP if not set
+    if [ -z "$SERVER_IP" ]; then
+        get_status
+    fi
+
     read -p "输入 SNIProxy 服务器 IP 地址 [默认: $SERVER_IP]: " proxy_ip
     proxy_ip=${proxy_ip:-$SERVER_IP}
 
@@ -310,29 +355,52 @@ configure_dnsmasq() {
         DOMAINS_FILE="proxy-domains.txt"
     else
         DOMAINS_FILE="/tmp/proxy-domains.txt"
-        wget -q -O $DOMAINS_FILE https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/proxy-domains.txt || \
-        curl -sL -o $DOMAINS_FILE https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/proxy-domains.txt
+        if ! wget -q -O $DOMAINS_FILE https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/proxy-domains.txt 2>/dev/null; then
+            if ! curl -sL -o $DOMAINS_FILE https://raw.githubusercontent.com/myxuchangbin/dnsmasq_sniproxy_install/master/proxy-domains.txt 2>/dev/null; then
+                echo -e "${BYellow}无法下载域名列表，使用默认配置${NC}"
+                # Use a minimal default list
+                cat > $DOMAINS_FILE << 'EOF'
+netflix.com
+netflix.net
+nflximg.com
+nflximg.net
+nflxvideo.net
+nflxext.com
+nflxso.net
+disney.com
+disneyplus.com
+disney-plus.net
+dssott.com
+hbo.com
+hbomax.com
+max.com
+youtube.com
+EOF
+            fi
+        fi
     fi
 
     # Generate dnsmasq config
-    echo "# DNSMasq Configuration" > /etc/dnsmasq.conf
-    echo "# Generated by SNIProxy Installer" >> /etc/dnsmasq.conf
-    echo "" >> /etc/dnsmasq.conf
-    echo "port=53" >> /etc/dnsmasq.conf
-    echo "domain-needed" >> /etc/dnsmasq.conf
-    echo "bogus-priv" >> /etc/dnsmasq.conf
-    echo "no-resolv" >> /etc/dnsmasq.conf
-    echo "server=/cn/223.5.5.5" >> /etc/dnsmasq.conf
-    echo "server=/cn/119.29.29.29" >> /etc/dnsmasq.conf
-    echo "resolv-file=/etc/resolv.dnsmasq.conf" >> /etc/dnsmasq.conf
-    echo "strict-order" >> /etc/dnsmasq.conf
-    echo "no-hosts" >> /etc/dnsmasq.conf
-    echo "listen-address=127.0.0.1,$SERVER_IP" >> /etc/dnsmasq.conf
-    echo "cache-size=10000" >> /etc/dnsmasq.conf
-    echo "log-queries" >> /etc/dnsmasq.conf
-    echo "log-facility=/var/log/dnsmasq.log" >> /etc/dnsmasq.conf
-    echo "" >> /etc/dnsmasq.conf
-    echo "# Streaming service domains" >> /etc/dnsmasq.conf
+    cat > /etc/dnsmasq.conf << EOF
+# DNSMasq Configuration
+# Generated by SNIProxy Installer
+
+port=53
+domain-needed
+bogus-priv
+no-resolv
+server=/cn/223.5.5.5
+server=/cn/119.29.29.29
+resolv-file=/etc/resolv.dnsmasq.conf
+strict-order
+no-hosts
+listen-address=127.0.0.1,$proxy_ip
+cache-size=10000
+log-queries
+log-facility=/var/log/dnsmasq.log
+
+# Streaming service domains
+EOF
 
     # Add domains to config
     while IFS= read -r domain; do
@@ -342,32 +410,17 @@ configure_dnsmasq() {
         echo "server=/$domain/$proxy_ip" >> /etc/dnsmasq.conf
     done < "$DOMAINS_FILE"
 
+    # Create log file
+    touch /var/log/dnsmasq.log
+    chmod 644 /var/log/dnsmasq.log
+
     systemctl enable dnsmasq
     systemctl restart dnsmasq
 
     echo -e "${BGreen}DNSMasq 配置完成${NC}"
 }
 
-# Show streaming services menu
-show_streaming_menu() {
-    echo -e "${BCyan}选择要代理的流媒体服务:${NC}"
-    echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "  ${BCyan}1)${NC}  全部服务 (默认)"
-    echo -e "  ${BCyan}2)${NC}  Netflix"
-    echo -e "  ${BCyan}3)${NC}  Disney+"
-    echo -e "  ${BCyan}4)${NC}  HBO Max"
-    echo -e "  ${BCyan}5)${NC}  Amazon Prime Video"
-    echo -e "  ${BCyan}6)${NC}  YouTube"
-    echo -e "  ${BCyan}7)${NC}  Hulu"
-    echo -e "  ${BCyan}8)${NC}  日本媒体 (AbemaTV, DMM等)"
-    echo -e "  ${BCyan}9)${NC}  台湾媒体 (KKTV, LineTV等)"
-    echo -e "  ${BCyan}10)${NC} 香港媒体 (ViuTV, MyTVSuper等)"
-    echo -e "  ${BCyan}11)${NC} AI平台 (OpenAI, Claude等)"
-    echo -e "  ${BCyan}12)${NC} 自定义域名列表"
-    echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
-
-# Main menu
+# Show main menu
 show_menu() {
     echo -e "${BCyan}请选择操作:${NC}"
     echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -381,7 +434,8 @@ show_menu() {
     echo -e "  ${BCyan}8)${NC}  重启服务"
     echo -e "  ${BCyan}9)${NC}  查看服务状态"
     echo -e "  ${BCyan}10)${NC} 查看日志"
-    echo -e "  ${BCyan}11)${NC} 卸载服务"
+    echo -e "  ${BCyan}11)${NC} 测试配置"
+    echo -e "  ${BCyan}12)${NC} 卸载服务"
     echo -e "  ${BCyan}0)${NC}  退出"
     echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
@@ -389,23 +443,59 @@ show_menu() {
 # Service control functions
 start_services() {
     echo -e "${BGreen}启动服务...${NC}"
-    systemctl start sniproxy 2>/dev/null && echo -e "${BGreen}SNIProxy 已启动${NC}" || echo -e "${BYellow}SNIProxy 启动失败或未安装${NC}"
-    systemctl start dnsmasq 2>/dev/null && echo -e "${BGreen}DNSMasq 已启动${NC}" || echo -e "${BYellow}DNSMasq 启动失败或未安装${NC}"
+
+    # Start SNIProxy
+    if systemctl start sniproxy 2>/dev/null; then
+        echo -e "${BGreen}✓ SNIProxy 已启动${NC}"
+    else
+        echo -e "${BYellow}✗ SNIProxy 启动失败或未安装${NC}"
+    fi
+
+    # Start DNSMasq
+    if systemctl start dnsmasq 2>/dev/null; then
+        echo -e "${BGreen}✓ DNSMasq 已启动${NC}"
+    else
+        echo -e "${BYellow}✗ DNSMasq 启动失败或未安装${NC}"
+    fi
 }
 
 stop_services() {
     echo -e "${BYellow}停止服务...${NC}"
-    systemctl stop sniproxy 2>/dev/null && echo -e "${BGreen}SNIProxy 已停止${NC}" || echo -e "${BYellow}SNIProxy 未运行${NC}"
-    systemctl stop dnsmasq 2>/dev/null && echo -e "${BGreen}DNSMasq 已停止${NC}" || echo -e "${BYellow}DNSMasq 未运行${NC}"
+
+    # Stop SNIProxy
+    if systemctl stop sniproxy 2>/dev/null; then
+        echo -e "${BGreen}✓ SNIProxy 已停止${NC}"
+    else
+        echo -e "${BYellow}✗ SNIProxy 未运行${NC}"
+    fi
+
+    # Stop DNSMasq
+    if systemctl stop dnsmasq 2>/dev/null; then
+        echo -e "${BGreen}✓ DNSMasq 已停止${NC}"
+    else
+        echo -e "${BYellow}✗ DNSMasq 未运行${NC}"
+    fi
 }
 
 restart_services() {
     echo -e "${BGreen}重启服务...${NC}"
-    systemctl restart sniproxy 2>/dev/null && echo -e "${BGreen}SNIProxy 已重启${NC}" || echo -e "${BYellow}SNIProxy 重启失败或未安装${NC}"
-    systemctl restart dnsmasq 2>/dev/null && echo -e "${BGreen}DNSMasq 已重启${NC}" || echo -e "${BYellow}DNSMasq 重启失败或未安装${NC}"
+
+    # Restart SNIProxy
+    if systemctl restart sniproxy 2>/dev/null; then
+        echo -e "${BGreen}✓ SNIProxy 已重启${NC}"
+    else
+        echo -e "${BYellow}✗ SNIProxy 重启失败或未安装${NC}"
+    fi
+
+    # Restart DNSMasq
+    if systemctl restart dnsmasq 2>/dev/null; then
+        echo -e "${BGreen}✓ DNSMasq 已重启${NC}"
+    else
+        echo -e "${BYellow}✗ DNSMasq 重启失败或未安装${NC}"
+    fi
 }
 
-# Show service status
+# Show service status - Fixed version
 show_status() {
     echo -e "${BCyan}服务状态:${NC}"
     echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -414,31 +504,40 @@ show_status() {
     echo -e "${BWhite}服务器 IP:${NC} ${BGreen}$SERVER_IP${NC}"
     echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
+    # Check SNIProxy ports
     if systemctl is-active --quiet sniproxy 2>/dev/null; then
-        echo -e "\n${BCyan}SNIProxy 端口监听:${NC}"
-        # Try ss first, then netstat, with better error handling
-        if command -v ss >/dev/null 2>&1; then
-            ss -tlnp 2>/dev/null | grep -E ':80|:443' | grep -v grep || true
-        elif command -v netstat >/dev/null 2>&1; then
-            netstat -tlnp 2>/dev/null | grep -E ':80|:443' | grep -v grep || true
+        echo ""
+        echo -e "${BCyan}SNIProxy 端口监听:${NC}"
+
+        # Check port 80
+        if lsof -i:80 -sTCP:LISTEN -t >/dev/null 2>&1; then
+            echo -e "  ${BGreen}✓${NC} HTTP  端口 80  - 正常"
         else
-            echo -e "${BYellow}  端口 80/443 (检测工具未安装)${NC}"
+            echo -e "  ${BRed}✗${NC} HTTP  端口 80  - 未监听"
+        fi
+
+        # Check port 443
+        if lsof -i:443 -sTCP:LISTEN -t >/dev/null 2>&1; then
+            echo -e "  ${BGreen}✓${NC} HTTPS 端口 443 - 正常"
+        else
+            echo -e "  ${BRed}✗${NC} HTTPS 端口 443 - 未监听"
         fi
     fi
 
+    # Check DNSMasq port
     if systemctl is-active --quiet dnsmasq 2>/dev/null; then
-        echo -e "\n${BCyan}DNSMasq 端口监听:${NC}"
-        # Try ss first, then netstat, with better error handling
-        if command -v ss >/dev/null 2>&1; then
-            ss -tlnp 2>/dev/null | grep ':53' | grep -v grep || true
-        elif command -v netstat >/dev/null 2>&1; then
-            netstat -tlnp 2>/dev/null | grep ':53' | grep -v grep || true
+        echo ""
+        echo -e "${BCyan}DNSMasq 端口监听:${NC}"
+
+        # Check port 53
+        if lsof -i:53 -sTCP:LISTEN -t >/dev/null 2>&1 || lsof -i:53 -sUDP:Idle -t >/dev/null 2>&1; then
+            echo -e "  ${BGreen}✓${NC} DNS 端口 53 - 正常"
         else
-            echo -e "${BYellow}  端口 53 (检测工具未安装)${NC}"
+            echo -e "  ${BRed}✗${NC} DNS 端口 53 - 未监听"
         fi
     fi
 
-    echo ""  # Add empty line for better formatting
+    echo ""
 }
 
 # View logs
@@ -448,11 +547,13 @@ view_logs() {
     echo -e "  ${BCyan}2)${NC} SNIProxy HTTPS 访问日志"
     echo -e "  ${BCyan}3)${NC} DNSMasq 查询日志"
     echo -e "  ${BCyan}4)${NC} 系统日志 (syslog)"
-    read -p "请选择 [1-4]: " log_choice
+    echo -e "  ${BCyan}5)${NC} 实时监控所有日志"
+    read -p "请选择 [1-5]: " log_choice
 
     case $log_choice in
         1)
             if [ -f /var/log/sniproxy/http_access.log ]; then
+                echo -e "${BCyan}最近的 HTTP 访问记录:${NC}"
                 tail -n 50 /var/log/sniproxy/http_access.log
             else
                 echo -e "${BYellow}日志文件不存在${NC}"
@@ -460,6 +561,7 @@ view_logs() {
             ;;
         2)
             if [ -f /var/log/sniproxy/https_access.log ]; then
+                echo -e "${BCyan}最近的 HTTPS 访问记录:${NC}"
                 tail -n 50 /var/log/sniproxy/https_access.log
             else
                 echo -e "${BYellow}日志文件不存在${NC}"
@@ -467,18 +569,99 @@ view_logs() {
             ;;
         3)
             if [ -f /var/log/dnsmasq.log ]; then
+                echo -e "${BCyan}最近的 DNS 查询记录:${NC}"
                 tail -n 50 /var/log/dnsmasq.log
             else
                 echo -e "${BYellow}日志文件不存在${NC}"
             fi
             ;;
         4)
+            echo -e "${BCyan}系统日志:${NC}"
             journalctl -xe -n 50
+            ;;
+        5)
+            echo -e "${BCyan}实时监控日志 (按 Ctrl+C 退出):${NC}"
+            tail -f /var/log/sniproxy/*.log /var/log/dnsmasq.log 2>/dev/null
             ;;
         *)
             echo -e "${BRed}无效选择${NC}"
             ;;
     esac
+}
+
+# Test configuration
+test_config() {
+    echo -e "${BCyan}测试配置...${NC}"
+    echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    # Check if services are running
+    echo -e "${BYellow}1. 服务运行状态:${NC}"
+    if systemctl is-active --quiet sniproxy 2>/dev/null; then
+        echo -e "   SNIProxy: ${BGreen}✓ 运行中${NC}"
+    else
+        echo -e "   SNIProxy: ${BRed}✗ 未运行${NC}"
+    fi
+
+    if systemctl is-active --quiet dnsmasq 2>/dev/null; then
+        echo -e "   DNSMasq:  ${BGreen}✓ 运行中${NC}"
+    else
+        echo -e "   DNSMasq:  ${BRed}✗ 未运行${NC}"
+    fi
+
+    # Test DNS resolution
+    echo ""
+    echo -e "${BYellow}2. 测试 DNS 解析:${NC}"
+    test_domains=("netflix.com" "youtube.com" "disney.com")
+
+    for domain in "${test_domains[@]}"; do
+        result=$(dig +short $domain @127.0.0.1 2>/dev/null | head -1)
+        if [ -n "$result" ]; then
+            echo -e "   $domain -> ${BGreen}$result${NC}"
+        else
+            echo -e "   $domain -> ${BRed}解析失败${NC}"
+        fi
+    done
+
+    # Test port connectivity
+    echo ""
+    echo -e "${BYellow}3. 测试端口连接:${NC}"
+
+    # Install nc if not available
+    if ! command -v nc >/dev/null 2>&1; then
+        echo -e "   ${BYellow}正在安装 netcat...${NC}"
+        if [ "$PKG_MANAGER" = "apt" ]; then
+            apt install -y netcat-openbsd 2>/dev/null || apt install -y netcat 2>/dev/null
+        else
+            yum install -y nc 2>/dev/null
+        fi
+    fi
+
+    for port in 80 443 53; do
+        if timeout 1 nc -zv 127.0.0.1 $port >/dev/null 2>&1; then
+            case $port in
+                80)  echo -e "   HTTP  (80):  ${BGreen}✓ 开放${NC}" ;;
+                443) echo -e "   HTTPS (443): ${BGreen}✓ 开放${NC}" ;;
+                53)  echo -e "   DNS   (53):  ${BGreen}✓ 开放${NC}" ;;
+            esac
+        else
+            case $port in
+                80)  echo -e "   HTTP  (80):  ${BRed}✗ 关闭${NC}" ;;
+                443) echo -e "   HTTPS (443): ${BRed}✗ 关闭${NC}" ;;
+                53)  echo -e "   DNS   (53):  ${BRed}✗ 关闭${NC}" ;;
+            esac
+        fi
+    done
+
+    # Test external connectivity
+    echo ""
+    echo -e "${BYellow}4. 测试外部连接:${NC}"
+    if curl -s -o /dev/null -w "%{http_code}" https://www.netflix.com --connect-timeout 5 | grep -q "200\|301\|302"; then
+        echo -e "   Netflix: ${BGreen}✓ 可访问${NC}"
+    else
+        echo -e "   Netflix: ${BRed}✗ 无法访问${NC}"
+    fi
+
+    echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
 # Uninstall services
@@ -505,6 +688,11 @@ uninstall_services() {
             yum remove -y sniproxy dnsmasq
         fi
 
+        # Remove config files
+        rm -f /etc/sniproxy.conf
+        rm -f /etc/dnsmasq.conf
+        rm -rf /var/log/sniproxy
+
         # Restore resolv.conf
         chattr -i /etc/resolv.conf
         if [ -f /etc/resolv.conf.bak.* ]; then
@@ -524,35 +712,6 @@ uninstall_services() {
     fi
 }
 
-# Test configuration
-test_config() {
-    echo -e "${BCyan}测试配置...${NC}"
-    echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-
-    # Test DNS resolution
-    echo -e "${BYellow}测试 DNS 解析:${NC}"
-    for domain in netflix.com youtube.com disney.com; do
-        result=$(dig +short $domain @127.0.0.1 2>/dev/null | head -1)
-        if [ -n "$result" ]; then
-            echo -e "  $domain -> ${BGreen}$result${NC}"
-        else
-            echo -e "  $domain -> ${BRed}解析失败${NC}"
-        fi
-    done
-
-    # Test port connectivity
-    echo -e "\n${BYellow}测试端口连接:${NC}"
-    for port in 80 443; do
-        if nc -zv 127.0.0.1 $port 2>/dev/null; then
-            echo -e "  端口 $port -> ${BGreen}开放${NC}"
-        else
-            echo -e "  端口 $port -> ${BRed}关闭${NC}"
-        fi
-    done
-
-    echo -e "${BWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-}
-
 # Main program
 main() {
     check_root
@@ -565,7 +724,7 @@ main() {
         echo ""
         show_menu
 
-        read -p "请输入选项 [0-11]: " choice
+        read -p "请输入选项 [0-12]: " choice
 
         case $choice in
             1)
@@ -574,6 +733,7 @@ main() {
                 install_dnsmasq
                 configure_dnsmasq
                 start_services
+                sleep 2
                 test_config
                 echo -e "${BGreen}完整安装完成！${NC}"
                 echo -e "${BYellow}请将客户端 DNS 设置为: ${BGreen}$SERVER_IP${NC}"
@@ -611,6 +771,9 @@ main() {
                 view_logs
                 ;;
             11)
+                test_config
+                ;;
+            12)
                 uninstall_services
                 ;;
             0)
