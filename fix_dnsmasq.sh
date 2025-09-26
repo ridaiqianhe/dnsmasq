@@ -1,14 +1,41 @@
 #!/bin/bash
 
 # DNSMasq Configuration Fix Script
-# This script fixes the "illegal repeated keyword" error
+# This script fixes the "illegal repeated keyword" error and service restart issues
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# Check if running as root
+[[ $EUID -ne 0 ]] && echo -e "[${RED}Error${NC}] 请使用root用户来执行脚本!" && exit 1
+
 echo -e "${YELLOW}修复 DNSMasq 配置问题...${NC}"
+
+# Safe service restart function
+safe_restart_service(){
+    local service_name=$1
+    if [ -z "$service_name" ]; then
+        echo -e "[${RED}Error${NC}] Service name cannot be empty"
+        return 1
+    fi
+    
+    # Check if service exists
+    if ! systemctl list-unit-files | grep -q "^${service_name}.service"; then
+        echo -e "[${RED}Error${NC}] Service ${service_name}.service does not exist"
+        return 1
+    fi
+    
+    echo -e "${YELLOW}Restarting ${service_name} service...${NC}"
+    if systemctl restart "${service_name}"; then
+        echo -e "${GREEN}✓ ${service_name} service restarted successfully${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Failed to restart ${service_name} service${NC}"
+        return 1
+    fi
+}
 
 # Stop dnsmasq first
 systemctl stop dnsmasq 2>/dev/null
@@ -115,18 +142,13 @@ echo -e "${YELLOW}测试配置文件语法...${NC}"
 if dnsmasq --test -C /etc/dnsmasq.conf; then
     echo -e "${GREEN}✓ 配置文件语法正确${NC}"
 
-    # Start dnsmasq
-    if systemctl start dnsmasq; then
-        echo -e "${GREEN}✓ DNSMasq 启动成功${NC}"
-
-        # Enable auto start
-        systemctl enable dnsmasq
-
+    # Start dnsmasq using safe restart function
+    systemctl enable dnsmasq
+    if safe_restart_service dnsmasq; then
         # Show status
         echo -e "${GREEN}DNSMasq 状态:${NC}"
         systemctl status dnsmasq --no-pager -l
     else
-        echo -e "${RED}✗ DNSMasq 启动失败${NC}"
         echo -e "${YELLOW}查看详细错误信息:${NC}"
         journalctl -xeu dnsmasq.service --no-pager -n 20
     fi
