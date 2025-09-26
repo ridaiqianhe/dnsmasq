@@ -206,11 +206,11 @@ install_dependencies(){
     elif check_sys packageManager apt; then
         if [[ ${fastmode} = "1" ]]; then
             apt_depends=(
-                curl gettext libev-dev libpcre3-dev libudns-dev
+                curl gettext libev-dev  libudns-dev
             )
         else
             apt_depends=(
-                autotools-dev cdbs curl gettext libev-dev libpcre3-dev libudns-dev autoconf devscripts
+                autotools-dev cdbs curl gettext libev-dev  libudns-dev autoconf devscripts
             )
         fi
         apt-get -y update
